@@ -22,7 +22,7 @@ GLOBAL_SKILLS = os.path.expanduser("~/.hermes/skills")
 MODEL = "deepseek-v4-pro"
 PROVIDER = "custom"
 BASE_URL = "https://api.deepseek.com"
-API_KEY = "sk-1ac8e9b6ad12438c88ccfb42b38878ac"
+API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
 # ── Project manager ────────────────────────────────────────────
 class ProjectManager:

@@ -14,7 +14,7 @@
 ## 领域知识
 
 - 项目目录在 `~/.hermes/projects/hermes-context-isolation/`
-- 项目文件要发到 GitHub 仓库 `wanyi715/hermes_workflow`
+- 项目文件要发到 GitHub 仓库 `wanyi715/hermes-context-isolation`
 - 核心对抗的问题是 **L0（Context Injection）到 L1（Scoped Task Mode）级别的隔离**——如何让 SOUL.md + MEMORY.md 真正发挥作用
 - 参考框架：CIL (Context Isolation Levels 0-4)，HiClaw 的 Manager-Workers 模式
 - 当前任务是：把这个项目本身的初始化做完，同时产出一套可发布的文档方法论
