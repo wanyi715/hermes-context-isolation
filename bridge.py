@@ -19,7 +19,7 @@ PROJECTS_DIR = os.path.expanduser("~/.hermes/projects")
 GLOBAL_MEMORY = os.path.expanduser("~/.hermes/memories/MEMORY.md")
 GLOBAL_SKILLS = os.path.expanduser("~/.hermes/skills")
 
-MODEL = "deepseek-chat"
+MODEL = "deepseek-v4-pro"
 PROVIDER = "custom"
 BASE_URL = "https://api.deepseek.com"
 API_KEY = "sk-1ac8e9b6ad12438c88ccfb42b38878ac"
@@ -412,6 +412,26 @@ Conversation:
 
     def _handle_chat(self, data):
         message = data.get("message", "").strip()
+        # Handle image upload: save base64 to temp file, prepend MEDIA: path
+        image_data = data.get("image", "")
+        if image_data and image_data.startswith("data:image/"):
+            import base64 as _b64, tempfile as _tmp
+            try:
+                # Extract base64 payload after the comma
+                payload = image_data.split(",", 1)[1]
+                img_bytes = _b64.b64decode(payload)
+                tmpf = _tmp.NamedTemporaryFile(suffix=".png", prefix="hermes_upload_", delete=False, dir="/tmp")
+                tmpf.write(img_bytes)
+                tmpf.close()
+                image_path = tmpf.name
+                if message:
+                    message = f"MEDIA:{image_path}\n{message}"
+                else:
+                    message = f"MEDIA:{image_path}\n请看这张图片"
+                data["message"] = message
+                print(f"[bridge] Image saved: {image_path} ({len(img_bytes)} bytes)")
+            except Exception as e:
+                print(f"[bridge] Image decode error: {e}")
         if not message:
             self.send_error(400); return
 
@@ -645,6 +665,8 @@ Conversation:
             resp = json.dumps({"project": key, "messages": msgs}, ensure_ascii=False)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers(); self.wfile.write(resp.encode("utf-8"))
+        elif path == "/api/session-history":
+            self._handle_session_history()
         elif path.startswith("/api/task/"):
             self._handle_task_poll(path)
         else:
@@ -674,6 +696,76 @@ Conversation:
                       if t["status"] in ("done", "error") and now - t["created"] > 60]
             for tid in stale:
                 del self.tasks[tid]
+
+    def _handle_session_history(self):
+        """GET /api/session-history — return recent cross-platform chat history.
+        Scans ~/.hermes/sessions/*.jsonl files for user-assistant conversations."""
+        import glob as _glob, time as _time
+        sessions_dir = os.path.expanduser("~/.hermes/sessions")
+        limit = 20
+        sessions = []
+
+        # Get all .jsonl files sorted by modification time (newest first)
+        jsonl_files = sorted(
+            _glob.glob(os.path.join(sessions_dir, "*.jsonl")),
+            key=lambda f: os.path.getmtime(f), reverse=True
+        )[:30]  # scan last 30 session files
+
+        for fp in jsonl_files:
+            fname = os.path.basename(fp)
+            # Extract date from filename: YYYYMMDD_HHMMSS_*
+            date_part = fname[:15]  # e.g. "20260519_085758"
+            try:
+                fdate = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]} {date_part[9:11]}:{date_part[11:13]}"
+            except:
+                fdate = "unknown"
+
+            platform = "unknown"
+            messages = []
+            try:
+                with open(fp) as f:
+                    for line in f:
+                        try:
+                            m = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        role = m.get("role", "")
+                        if role == "session_meta":
+                            platform = m.get("platform", "unknown")
+                        elif role in ("user", "assistant"):
+                            content = str(m.get("content", "")).strip()
+                            if content:
+                                messages.append({"role": role, "content": content[:300], "platform": m.get("platform", platform)})
+            except Exception:
+                continue
+
+            if not messages:
+                continue
+
+            # Count user messages and extract preview (first user message)
+            user_msgs = [m for m in messages if m["role"] == "user"]
+            if not user_msgs:
+                continue
+
+            preview = user_msgs[0]["content"][:100]
+            msg_count = len(messages)
+
+            sessions.append({
+                "session_id": fname.replace(".jsonl", ""),
+                "date": fdate,
+                "platform": platform,
+                "preview": preview,
+                "message_count": msg_count,
+                "user_messages": len(user_msgs),
+            })
+
+            if len(sessions) >= limit:
+                break
+
+        self.send_response(200); self._cors()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(json.dumps({"sessions": sessions}, ensure_ascii=False).encode("utf-8"))
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
