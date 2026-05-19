@@ -75,7 +75,7 @@ class ProjectManager:
             skills_path = os.path.join(path, "skills")
             workspace_path = os.path.join(path, "workspace")
 
-            # Extract Chinese display name from SOUL.md (e.g. "# SOUL — 半导体财报分析")
+            # Extract Chinese display name from SOUL.md (e.g. "# SOUL — 示例项目 Alpha")
             display_name = name.replace("-", " ").title()
             soul_content = self._read_file(soul_path)
             if soul_content:
@@ -256,8 +256,8 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     # Project display names for LLM routing
     PROJECT_DISPLAY = {
-        "emperor-game": "皇帝模拟游戏", "redmane": "红鬃烈马", "earnings": "半导体财报分析",
-        "morning-brief": "AI早报", "podcast": "播客制作", "hermes-agent": "Hermes Agent"
+        "alpha": "示例项目 Alpha", "beta": "示例项目 Beta", "gamma": "示例项目 Gamma",
+        "delta": "示例项目 Delta", "epsilon": "示例项目 Epsilon", "hermes-agent": "Hermes Agent"
     }
 
     def do_OPTIONS(self):

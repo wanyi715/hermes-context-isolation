@@ -26,12 +26,12 @@ def api_post(path, data):
 # ─── Test 1: 检测现有项目 ───
 print("\n📋 Test 1: 话题检测 → 现有项目")
 
-# 模拟讨论皇帝游戏的对话
+# 模拟讨论 alpha 项目的对话
 msgs = [
-    {"role": "user", "text": "皇帝游戏 v0.3.8 有个 bug，大臣无法任命"},
-    {"role": "assistant", "text": "让我看看 main.py 的任命逻辑"},
-    {"role": "user", "text": "问题是角色列表没刷新"},
-    {"role": "assistant", "text": "找到问题了，src/ 目录下的角色管理器没更新"},
+    {"role": "user", "text": "alpha 项目有个 bug，功能无法正常使用"},
+    {"role": "assistant", "text": "让我看看 main.py 的逻辑"},
+    {"role": "user", "text": "问题是数据列表没刷新"},
+    {"role": "assistant", "text": "找到问题了，src/ 目录下的管理器没更新"},
 ]
 data, code = api_post("/api/detect-topic", {"messages": msgs})
 if code == 200:
@@ -47,9 +47,9 @@ else:
 print("\n📋 Test 2: 话题检测 → 新项目")
 
 msgs2 = [
-    {"role": "user", "text": "我想做一个自动化数据看板，每天抓取芯片价格数据"},
+    {"role": "user", "text": "我想做一个自动化数据看板，每天抓取业务数据做分析"},
     {"role": "assistant", "text": "好的，这需要定时爬虫 + 数据库 + 前端可视化"},
-    {"role": "user", "text": "对，数据源有官网、交易所 API，还要做趋势分析"},
+    {"role": "user", "text": "对，数据源有多个渠道，还要做趋势分析"},
     {"role": "assistant", "text": "这个规模确实需要一个独立项目来管理"},
 ]
 data, code = api_post("/api/detect-topic", {"messages": msgs2})
@@ -113,7 +113,7 @@ else:
 # ─── Test 6: 切换项目 ───
 print("\n📋 Test 6: 切换项目")
 
-data, code = api_post("/api/switch-project", {"project": "emperor-game"})
+data, code = api_post("/api/switch-project", {"project": "alpha"})
 if code == 200:
     ok(f"切换成功，当前: {data.get('current')}")
 else:

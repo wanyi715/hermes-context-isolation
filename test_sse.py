@@ -84,14 +84,14 @@ else:
 
 # ─── Test 3: 项目隔离 ───
 print("\n📋 Test 3: 跨项目隔离")
-# 先在 emperor-game 发一条
-events1, t1, e1 = sse_chat("记住：测试项目是emperor-game", project="emperor-game", timeout=60)
+# 先在 alpha 发一条
+events1, t1, e1 = sse_chat("记住：测试项目是alpha", project="alpha", timeout=60)
 # 再在 hermes-agent 问
 events2, t2, e2 = sse_chat("我刚才说测试项目是什么？如果不知道就说不知道", project="hermes-agent", timeout=60)
-if "emperor" in t2.lower() or "皇帝" in t2:
-    no(f"跨项目泄露！hermes-agent 回复提到了 emperor-game: {t2[:60]}")
+if "alpha" in t2.lower():
+    no(f"跨项目泄露！hermes-agent 回复提到了 alpha: {t2[:60]}")
 else:
-    ok(f"项目隔离正常（hermes-agent 不知道 emperor-game 的内容）: {t2[:60]}")
+    ok(f"项目隔离正常（hermes-agent 不知道 alpha 的内容）: {t2[:60]}")
 
 # ─── Test 4: 并发请求 ───
 print("\n📋 Test 4: 并发请求（线程安全）")
