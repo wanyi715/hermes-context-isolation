@@ -12,6 +12,13 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse
 
+# Load .env so tools like web_extract can find API keys (FIRECRAWL_API_KEY, etc.)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.expanduser("~/.hermes/.env"))
+except ImportError:
+    pass
+
 sys.path.insert(0, os.path.expanduser("~/.hermes/hermes-agent"))
 from run_agent import AIAgent
 
@@ -19,7 +26,7 @@ PROJECTS_DIR = os.path.expanduser("~/.hermes/projects")
 GLOBAL_MEMORY = os.path.expanduser("~/.hermes/memories/MEMORY.md")
 GLOBAL_SKILLS = os.path.expanduser("~/.hermes/skills")
 
-MODEL = "deepseek-v4-pro"
+MODEL = os.environ.get("HERMES_MODEL", "deepseek-chat")
 PROVIDER = "custom"
 BASE_URL = "https://api.deepseek.com"
 API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
@@ -36,6 +43,32 @@ class ProjectManager:
 
     def _session_path(self, key):
         return os.path.join(self._sessions_dir, f"{key}.json")
+
+    def _topics_path(self, key):
+        return os.path.join(self._sessions_dir, f"topics_{key}.json")
+
+    def _topic_msgs_path(self, topic_id):
+        return os.path.join(self._sessions_dir, f"topic_msgs_{topic_id}.json")
+
+    def save_topic_messages(self, topic_id, messages):
+        """Persist topic messages to disk for cross-device sync."""
+        try:
+            with open(self._topic_msgs_path(topic_id), "w") as f:
+                json.dump(messages[-100:], f, ensure_ascii=False)
+            return True
+        except Exception:
+            return False
+
+    def load_topic_messages(self, topic_id):
+        """Load topic messages from disk."""
+        tp = self._topic_msgs_path(topic_id)
+        if not os.path.exists(tp):
+            return []
+        try:
+            with open(tp) as f:
+                return json.load(f)
+        except Exception:
+            return []
 
     def _save_session(self, key):
         """Persist session messages to disk so they survive bridge restarts."""
@@ -75,7 +108,7 @@ class ProjectManager:
             skills_path = os.path.join(path, "skills")
             workspace_path = os.path.join(path, "workspace")
 
-            # Extract Chinese display name from SOUL.md (e.g. "# SOUL — 示例项目 Alpha")
+            # Extract Chinese display name from SOUL.md (e.g. "# SOUL — 半导体财报分析")
             display_name = name.replace("-", " ").title()
             soul_content = self._read_file(soul_path)
             if soul_content:
@@ -165,7 +198,7 @@ class ProjectManager:
             max_iterations=30,
             skip_memory=True,  # Skip global memory, we inject project memory
             ephemeral_system_prompt=context,
-            disabled_toolsets=["session_search"],  # too slow on 138MB state.db; use project MEMORY instead
+            disabled_toolsets=[],
         )
         return agent
 
@@ -234,7 +267,15 @@ class ProjectManager:
         """Build system context string for the current project."""
         key = project_key or self.current
         if key == "main":
-            return ""
+            main_dir = os.path.join(PROJECTS_DIR, "main")
+            soul = self._read_file(os.path.join(main_dir, "SOUL.md"))
+            memory = self._read_file(os.path.join(main_dir, "MEMORY.md"))
+            parts = []
+            if soul:
+                parts.append(soul)
+            if memory:
+                parts.append("【主窗口背景知识：】\n" + memory)
+            return "\n\n".join(parts)
         info = self.projects.get(key, {})
         parts = []
         soul = info.get("soul", "")
@@ -248,6 +289,64 @@ class ProjectManager:
 
 pm = ProjectManager()
 
+
+def _build_user_message(data):
+    """Build user_message from request data.
+    If an image is attached, return a multimodal content array
+    (Hermes natively supports this — see codex_responses_adapter.py).
+    Otherwise return a plain string.
+    """
+    text = data.get("message", "").strip()
+    image = data.get("image")
+    if image:
+        parts = []
+        parts.append({"type": "text", "text": text or "请看这张图片"})
+        parts.append({"type": "image_url", "image_url": {"url": image}})
+        return parts
+    return text
+
+
+def _message_preview(msg):
+    """Safe preview string for logging — handles both str and list."""
+    if isinstance(msg, str):
+        return msg
+    if isinstance(msg, list):
+        text = next((p.get("text", "") for p in msg if isinstance(p, dict) and p.get("type") == "text"), "")
+        has_img = any(isinstance(p, dict) and p.get("type") == "image_url" for p in msg)
+        if has_img:
+            return ("🖼 " + text) if text else "🖼 [图片]"
+        return text
+    return str(msg)
+
+
+import re as _re
+_FILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".txt", ".md",
+                    ".py", ".json", ".csv", ".xlsx", ".docx", ".pptx", ".mp3", ".mp4",
+                    ".html", ".zip", ".tar.gz", ".log"}
+
+def _detect_files(text):
+    """Scan AI response for file paths the user might want to download.
+    Returns a list of {path, name, type} dicts."""
+    if not isinstance(text, str):
+        return []
+    files = []
+    seen = set()
+    # Match absolute paths under safe directories
+    _HOME = os.path.expanduser("~") + "/"
+    for m in _re.finditer(r'(/tmp/[\w./-]+\.\w{2,5}|' + _re.escape(_HOME) + r'[\w./-]+\.\w{2,5})', text):
+        fp = m.group(0).rstrip('.,;:!?）)')
+        if fp in seen:
+            continue
+        ext = os.path.splitext(fp)[1].lower()
+        if ext in _FILE_EXTENSIONS and os.path.isfile(fp):
+            seen.add(fp)
+            files.append({
+                "path": fp,
+                "name": os.path.basename(fp),
+                "type": "image" if ext in {".png", ".jpg", ".jpeg", ".gif", ".svg"} else "file"
+            })
+    return files
+
 # ── HTTP Handler ───────────────────────────────────────────────
 class ChatHandler(BaseHTTPRequestHandler):
     # Task buffer for polling mode (like iLink Bot's buffer layer)
@@ -256,8 +355,8 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     # Project display names for LLM routing
     PROJECT_DISPLAY = {
-        "alpha": "示例项目 Alpha", "beta": "示例项目 Beta", "gamma": "示例项目 Gamma",
-        "delta": "示例项目 Delta", "epsilon": "示例项目 Epsilon", "hermes-agent": "Hermes Agent"
+        "alpha": "Alpha 项目", "beta": "Beta 项目", "gamma": "Gamma 项目",
+        "hermes-agent": "Hermes Agent"
     }
 
     def do_OPTIONS(self):
@@ -278,8 +377,36 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._handle_detect_topic(data)
         elif path == "/api/create-project":
             self._handle_create_project(data)
+        elif path == "/api/topics":
+            self._handle_topics(data)
+        elif path == "/api/topic-messages":
+            self._handle_topic_messages(data)
         else:
             self.send_error(404)
+
+    def _handle_topics(self, data):
+        """POST /api/topics — save topics to server for cross-device sync.
+        Body: {"project": "key", "topics": [...]}"""
+        project_key = data.get("project", pm.current)
+        topics = data.get("topics", [])
+        tp = pm._topics_path(project_key)
+        try:
+            with open(tp, "w") as f:
+                json.dump(topics, f, ensure_ascii=False)
+            self._respond_json({"status": "ok", "count": len(topics)})
+            print(f"[bridge] Saved {len(topics)} topics for {project_key}")
+        except Exception as e:
+            self._respond_json({"error": str(e)})
+
+    def _handle_topic_messages(self, data):
+        """POST /api/topic-messages — save topic messages to server for cross-device sync.
+        Body: {"project": "key", "topicId": "t_xxx", "messages": [...]}"""
+        topic_id = data.get("topicId", "")
+        if not topic_id:
+            self.send_error(400); return
+        msgs = data.get("messages", [])
+        ok = pm.save_topic_messages(topic_id, msgs)
+        self._respond_json({"status": "ok" if ok else "error", "count": len(msgs)})
 
     def _handle_detect_topic(self, data):
         """Unified intent detection: existing project / new project / new topic / none."""
@@ -411,27 +538,8 @@ Conversation:
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
     def _handle_chat(self, data):
-        message = data.get("message", "").strip()
-        # Handle image upload: save base64 to temp file, prepend MEDIA: path
-        image_data = data.get("image", "")
-        if image_data and image_data.startswith("data:image/"):
-            import base64 as _b64, tempfile as _tmp
-            try:
-                # Extract base64 payload after the comma
-                payload = image_data.split(",", 1)[1]
-                img_bytes = _b64.b64decode(payload)
-                tmpf = _tmp.NamedTemporaryFile(suffix=".png", prefix="hermes_upload_", delete=False, dir="/tmp")
-                tmpf.write(img_bytes)
-                tmpf.close()
-                image_path = tmpf.name
-                if message:
-                    message = f"MEDIA:{image_path}\n{message}"
-                else:
-                    message = f"MEDIA:{image_path}\n请看这张图片"
-                data["message"] = message
-                print(f"[bridge] Image saved: {image_path} ({len(img_bytes)} bytes)")
-            except Exception as e:
-                print(f"[bridge] Image decode error: {e}")
+        message = _build_user_message(data)
+        text_only = data.get("message", "").strip()
         if not message:
             self.send_error(400); return
 
@@ -449,7 +557,7 @@ Conversation:
         explicit_project = data.get("project")
         project_key = explicit_project if explicit_project else pm.current
         is_main = (project_key == "main")
-        print(f"[bridge] Chat ({project_key}): {message[:60]}...")
+        print(f"[bridge] Chat ({project_key}): {_message_preview(message)[:60]}...")
 
         try:
             agent = pm.get_agent(project_key)
@@ -474,14 +582,14 @@ Conversation:
             print(f"[bridge] Error: {e}")
             response = f"抱歉，出错了：{e}"
 
-        pm.add_message("user", data["message"], project_key)
+        pm.add_message("user", text_only or "🖼️ 图片", project_key)
         pm.add_message("assistant", response, project_key)
 
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
-        self.wfile.write(json.dumps({"response": response, "project": project_key}, ensure_ascii=False).encode("utf-8"))
+        self.wfile.write(json.dumps({"response": response, "files": _detect_files(response), "project": project_key}, ensure_ascii=False).encode("utf-8"))
 
     def _handle_chat_polling(self, data):
         """Polling mode: create a task, run agent in background, return task_id immediately.
@@ -489,7 +597,10 @@ Conversation:
         This is the reliable mode — no long-lived connections, like iLink Bot's buffer."""
         import uuid, time as _time
 
-        message = data.get("message", "").strip()
+        message = _build_user_message(data)
+        text_only = data.get("message", "").strip()
+        if not message:
+            self.send_error(400); return
         explicit_project = data.get("project")
         project_key = explicit_project if explicit_project else pm.current
         is_main = (project_key == "main")
@@ -499,6 +610,7 @@ Conversation:
             self.tasks[task_id] = {
                 "status": "processing",
                 "response": "",
+                "files": [],
                 "error": "",
                 "project": project_key,
                 "created": _time.time()
@@ -521,18 +633,19 @@ Conversation:
                     conversation_history=messages if messages else None,
                 )
                 response = result.get("final_response", "")
-                pm.add_message("user", data["message"], project_key)
+                pm.add_message("user", text_only or "🖼️ 图片", project_key)
                 pm.add_message("assistant", response, project_key)
                 with self._task_lock:
                     self.tasks[task_id]["status"] = "done"
                     self.tasks[task_id]["response"] = response
+                    self.tasks[task_id]["files"] = _detect_files(response)
             except Exception as e:
                 print(f"[bridge] Task {task_id} error: {e}")
                 with self._task_lock:
                     self.tasks[task_id]["status"] = "error"
                     self.tasks[task_id]["error"] = str(e)
 
-        print(f"[bridge] Polling task {task_id} ({project_key}): {message[:60]}...")
+        print(f"[bridge] Polling task {task_id} ({project_key}): {_message_preview(message)[:60]}...")
         t = threading.Thread(target=run_task, daemon=True)
         t.start()
 
@@ -545,11 +658,12 @@ Conversation:
     def _handle_chat_streaming(self, data):
         """Stream chat response with SSE heartbeats so the browser doesn't disconnect."""
         import time as _time
-        message = data.get("message", "").strip()
+        message = _build_user_message(data)
+        text_only = data.get("message", "").strip()
         explicit_project = data.get("project")
         project_key = explicit_project if explicit_project else pm.current
         is_main = (project_key == "main")
-        print(f"[bridge] Chat SSE ({project_key}): {message[:60]}...")
+        print(f"[bridge] Chat SSE ({project_key}): {_message_preview(message)[:60]}...")
 
         # SSE headers
         self.send_response(200)
@@ -607,7 +721,7 @@ Conversation:
         t.join(timeout=1)
 
         # Record messages
-        pm.add_message("user", data["message"], project_key)
+        pm.add_message("user", text_only or "🖼️ 图片", project_key)
         if result_holder["error"]:
             response = f"抱歉，出错了：{result_holder['error']}"
             sse_send(self, "error", {"message": response})
@@ -615,6 +729,10 @@ Conversation:
             response = result_holder["response"]
             pm.add_message("assistant", response, project_key)
             sse_send(self, "done", {"response": response, "project": project_key})
+            # Send files if detected
+            files = _detect_files(response)
+            if files:
+                sse_send(self, "files", {"files": files})
 
         # Send close event and terminate connection
         try:
@@ -665,8 +783,37 @@ Conversation:
             resp = json.dumps({"project": key, "messages": msgs}, ensure_ascii=False)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers(); self.wfile.write(resp.encode("utf-8"))
-        elif path == "/api/session-history":
-            self._handle_session_history()
+        elif path == "/api/topics":
+            # Return server-side topics (GET) for cross-device sync
+            # Supports ?project=xxx query parameter
+            from urllib.parse import parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            key = qs.get("project", [pm.current])[0]
+            topics = []
+            tp = pm._topics_path(key)
+            if os.path.exists(tp):
+                try:
+                    with open(tp) as f:
+                        topics = json.load(f)
+                except Exception:
+                    pass
+            self.send_response(200); self._cors()
+            resp = json.dumps({"project": key, "topics": topics}, ensure_ascii=False)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers(); self.wfile.write(resp.encode("utf-8"))
+        elif path == "/api/topic-messages":
+            # Return server-side topic messages (GET) — cross-device sync
+            # Supports ?topicId=xxx query parameter
+            from urllib.parse import parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            topic_id = qs.get("topicId", [""])[0]
+            msgs = pm.load_topic_messages(topic_id) if topic_id else []
+            self.send_response(200); self._cors()
+            resp = json.dumps({"topicId": topic_id, "messages": msgs}, ensure_ascii=False)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers(); self.wfile.write(resp.encode("utf-8"))
+        elif path.startswith("/api/download"):
+            self._handle_download()
         elif path.startswith("/api/task/"):
             self._handle_task_poll(path)
         else:
@@ -697,75 +844,38 @@ Conversation:
             for tid in stale:
                 del self.tasks[tid]
 
-    def _handle_session_history(self):
-        """GET /api/session-history — return recent cross-platform chat history.
-        Scans ~/.hermes/sessions/*.jsonl files for user-assistant conversations."""
-        import glob as _glob, time as _time
-        sessions_dir = os.path.expanduser("~/.hermes/sessions")
-        limit = 20
-        sessions = []
-
-        # Get all .jsonl files sorted by modification time (newest first)
-        jsonl_files = sorted(
-            _glob.glob(os.path.join(sessions_dir, "*.jsonl")),
-            key=lambda f: os.path.getmtime(f), reverse=True
-        )[:30]  # scan last 30 session files
-
-        for fp in jsonl_files:
-            fname = os.path.basename(fp)
-            # Extract date from filename: YYYYMMDD_HHMMSS_*
-            date_part = fname[:15]  # e.g. "20260519_085758"
-            try:
-                fdate = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]} {date_part[9:11]}:{date_part[11:13]}"
-            except:
-                fdate = "unknown"
-
-            platform = "unknown"
-            messages = []
-            try:
-                with open(fp) as f:
-                    for line in f:
-                        try:
-                            m = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        role = m.get("role", "")
-                        if role == "session_meta":
-                            platform = m.get("platform", "unknown")
-                        elif role in ("user", "assistant"):
-                            content = str(m.get("content", "")).strip()
-                            if content:
-                                messages.append({"role": role, "content": content[:300], "platform": m.get("platform", platform)})
-            except Exception:
-                continue
-
-            if not messages:
-                continue
-
-            # Count user messages and extract preview (first user message)
-            user_msgs = [m for m in messages if m["role"] == "user"]
-            if not user_msgs:
-                continue
-
-            preview = user_msgs[0]["content"][:100]
-            msg_count = len(messages)
-
-            sessions.append({
-                "session_id": fname.replace(".jsonl", ""),
-                "date": fdate,
-                "platform": platform,
-                "preview": preview,
-                "message_count": msg_count,
-                "user_messages": len(user_msgs),
-            })
-
-            if len(sessions) >= limit:
-                break
-
-        self.send_response(200); self._cors()
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(json.dumps({"sessions": sessions}, ensure_ascii=False).encode("utf-8"))
+    def _handle_download(self):
+        """GET /api/download?path=<absolute_path> — serve a file for download.
+        Only allows paths under safe directories (/tmp, ~, /var/www/html)."""
+        from urllib.parse import parse_qs, unquote
+        qs = parse_qs(urlparse(self.path).query)
+        raw = qs.get("path", [""])[0]
+        filepath = os.path.abspath(unquote(raw))
+        # Security: only allow safe directories
+        allowed = ["/tmp/", os.path.expanduser("~") + "/", "/var/www/html/"]
+        if not any(filepath.startswith(d) for d in allowed):
+            self.send_error(403, "Access denied")
+            return
+        if not os.path.isfile(filepath):
+            self.send_error(404, "File not found")
+            return
+        try:
+            filename = os.path.basename(filepath)
+            # Determine MIME type
+            import mimetypes
+            mime, _ = mimetypes.guess_type(filepath)
+            if mime is None:
+                mime = "application/octet-stream"
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(os.path.getsize(filepath)))
+            self.end_headers()
+            with open(filepath, "rb") as f:
+                self.wfile.write(f.read())
+        except Exception as e:
+            self.send_error(500, str(e))
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")

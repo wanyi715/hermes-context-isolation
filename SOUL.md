@@ -22,5 +22,5 @@
 ## 关键规则
 
 - **"项目"和"产物"要分开**：项目的核心是方法论/工作流（如何隔离上下文），产物是这套方法论输出的文档/分析文章
-- 改动 /home/admin/.hermes/projects/hermes-context-isolation/ 下的文件前先确认
+- 改动 ~/.hermes/projects/hermes-context-isolation/ 下的文件前先确认
 - MEMORY.md 只存稳定事实，不存临时任务状态
