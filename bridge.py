@@ -8,6 +8,7 @@ GET  /api/health         → {"status":"ok"}
 """
 
 import json, sys, os, threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse
@@ -37,57 +38,82 @@ class ProjectManager:
         self.projects = {}
         self.sessions = {}  # key -> {"agent": AIAgent, "messages": [...]}
         self.current = "main"
-        self._sessions_dir = os.path.expanduser("~/.hermes/sessions")
-        os.makedirs(self._sessions_dir, exist_ok=True)
         self._load_projects()
 
-    def _session_path(self, key):
-        return os.path.join(self._sessions_dir, f"{key}.json")
+    # ── Project-scoped file paths (chat history lives WITH the project) ──
+    def _project_dir(self, key):
+        return os.path.join(PROJECTS_DIR, key)
 
-    def _topics_path(self, key):
-        return os.path.join(self._sessions_dir, f"topics_{key}.json")
+    def _chat_path(self, key):
+        return os.path.join(self._project_dir(key), "chat_history.json")
 
-    def _topic_msgs_path(self, topic_id):
-        return os.path.join(self._sessions_dir, f"topic_msgs_{topic_id}.json")
+    def _archive_dir(self, key):
+        return os.path.join(self._project_dir(key), "archive")
 
-    def save_topic_messages(self, topic_id, messages):
-        """Persist topic messages to disk for cross-device sync."""
-        try:
-            with open(self._topic_msgs_path(topic_id), "w") as f:
-                json.dump(messages[-100:], f, ensure_ascii=False)
-            return True
-        except Exception:
-            return False
 
-    def load_topic_messages(self, topic_id):
-        """Load topic messages from disk."""
-        tp = self._topic_msgs_path(topic_id)
-        if not os.path.exists(tp):
-            return []
-        try:
-            with open(tp) as f:
-                return json.load(f)
-        except Exception:
-            return []
+    # ── Chat history persistence (project-scoped, with archive) ──
+    MAX_RECENT = 50  # keep last 50 messages in chat_history.json
 
     def _save_session(self, key):
-        """Persist session messages to disk so they survive bridge restarts."""
+        """Persist session to project dir. Messages beyond MAX_RECENT go to archive/."""
         if key not in self.sessions:
             return
         try:
-            msgs = self.sessions[key]["messages"][-200:]  # keep last 200
-            with open(self._session_path(key), "w") as f:
-                json.dump(msgs, f, ensure_ascii=False)
+            all_msgs = self.sessions[key]["messages"]
+            # Recent messages → chat_history.json
+            recent = all_msgs[-self.MAX_RECENT:]
+            sp = self._chat_path(key)
+            tmp = sp + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(recent, f, ensure_ascii=False)
+            os.rename(tmp, sp)  # atomic on Linux
+
+            # Older messages → archive/YYYY-MM.json
+            older = all_msgs[:-self.MAX_RECENT]
+            if older:
+                import datetime as _dt
+                ad = self._archive_dir(key)
+                os.makedirs(ad, exist_ok=True)
+                # Archive by month of first message in batch
+                month_key = _dt.datetime.now().strftime("%Y-%m")
+                ap = os.path.join(ad, f"{month_key}.json")
+                # Merge with existing archive if present
+                existing = []
+                if os.path.exists(ap):
+                    try:
+                        with open(ap) as f:
+                            existing = json.load(f)
+                    except Exception:
+                        pass
+                merged = existing + older
+                with open(ap + ".tmp", "w") as f:
+                    json.dump(merged, f, ensure_ascii=False)
+                os.rename(ap + ".tmp", ap)
         except Exception:
             pass
 
     def _load_session(self, key):
-        """Restore session messages from disk."""
+        """Restore session from project dir (chat_history.json + archives)."""
         try:
-            sp = self._session_path(key)
+            all_msgs = []
+            # 1. Load recent
+            sp = self._chat_path(key)
             if os.path.exists(sp):
                 with open(sp) as f:
-                    return json.load(f)
+                    all_msgs = json.load(f)
+            # 2. Load archives (newest-first)
+            ad = self._archive_dir(key)
+            if os.path.isdir(ad):
+                for fname in sorted(os.listdir(ad), reverse=True):
+                    if fname.endswith(".json"):
+                        try:
+                            with open(os.path.join(ad, fname)) as f:
+                                archived = json.load(f)
+                                # Prepend older messages
+                                all_msgs = archived + all_msgs
+                        except Exception:
+                            pass
+            return all_msgs
         except Exception:
             pass
         return []
@@ -127,6 +153,23 @@ class ProjectManager:
                 "memory_lines": self._count_lines(memory_path),
             }
         print(f"[bridge] Loaded {len(self.projects)} projects: {list(self.projects.keys())}")
+        # Preload main agent synchronously so first message is fast
+        try:
+            self.get_agent("main")
+        except Exception:
+            pass
+        # Preload other agents in background (avoid blocking startup)
+        import threading
+        def _preload_others():
+            for name in self.projects:
+                if name == "main":
+                    continue
+                try:
+                    self.get_agent(name)
+                    print(f"[bridge] Preloaded agent: {name}")
+                except Exception:
+                    pass
+        threading.Thread(target=_preload_others, daemon=True).start()
 
     def _read_file(self, path):
         if path and os.path.isfile(path):
@@ -165,7 +208,7 @@ class ProjectManager:
     def get_agent(self, project_key=None):
         """Get or create AIAgent for a project."""
         key = project_key or self.current
-        if key not in self.sessions:
+        if key not in self.sessions or "agent" not in self.sessions.get(key, {}):
             # Restore messages from disk if available
             saved_msgs = self._load_session(key)
             self.sessions[key] = {
@@ -184,6 +227,23 @@ class ProjectManager:
 
         # Build project context for ephemeral system prompt
         context_parts = []
+        # Project identity boundary — forces agent to stay in scope
+        project_name = info.get("name", project_key)
+        identity_line = (
+            f"## ⚠️ 项目边界（最高优先级，覆盖所有其他指令）\n\n"
+            f"你正在 **{project_name}** 项目窗口内。\n"
+            f"用户说「这个项目」指的是 {project_name}。\n"
+            f"忽略主 persona 中其他项目的知识——那些项目有自己独立的窗口。\n"
+            f"只处理和 {project_name} 相关的事务，不要越界处理其他项目。\n"
+            f"如果项目本身没有可汇报的内容，就说「目前没有新进展」，不要跳到其他项目找内容。\n"
+        )
+        if project_key != "main":
+            workspace = info.get("workspace")
+            if workspace:
+                identity_line += f"项目文件在 {workspace}。\n"
+            else:
+                identity_line += f"项目文件在 {PROJECTS_DIR}/{project_key}/。\n"
+        context_parts.append(identity_line)
         if soul:
             context_parts.append(soul)
         if memory:
@@ -195,7 +255,7 @@ class ProjectManager:
             provider=PROVIDER,
             base_url=BASE_URL,
             api_key=API_KEY,
-            max_iterations=30,
+            max_iterations=20,  # Web chat doesn't need 30+ rounds; 20 balances depth vs timeout
             skip_memory=True,  # Skip global memory, we inject project memory
             ephemeral_system_prompt=context,
             disabled_toolsets=[],
@@ -207,10 +267,10 @@ class ProjectManager:
         if key not in self.sessions:
             self.get_agent(key)  # ensure session exists
         self.sessions[key]["messages"].append({"role": role, "content": text})
-        # Trim to last 30 messages to prevent memory bloat
-        if len(self.sessions[key]["messages"]) > 30:
-            self.sessions[key]["messages"] = self.sessions[key]["messages"][-30:]
-        # Persist to disk so sessions survive bridge restarts
+        # Keep up to 100 in memory; _save_session archives older to archive/
+        if len(self.sessions[key]["messages"]) > 100:
+            self.sessions[key]["messages"] = self.sessions[key]["messages"][-100:]
+        # Persist to project dir (chat_history.json + archive/)
         self._save_session(key)
 
     def get_context_data(self, project_key=None):
@@ -284,6 +344,18 @@ class ProjectManager:
             parts.append(soul)
         if memory:
             parts.append("【本项目专属记忆：】\n" + memory)
+        # Inject project-level skills so AI knows what's available
+        skills_dir = info.get("skills")
+        if skills_dir and os.path.isdir(skills_dir):
+            md_files = sorted([f for f in os.listdir(skills_dir) if f.endswith(".md")])
+            if md_files:
+                lines = ["【本项目专属技能——可用 read_file 直接读取：】"]
+                for f in md_files:
+                    skill_path = os.path.join(skills_dir, f)
+                    first = self._read_file(skill_path)[:80].split("\n")[0]
+                    name = f.replace(".md", "").replace("-", " ").replace("_", " ")
+                    lines.append(f"- {name}: {first} (文件: skills/{f})")
+                parts.append("\n".join(lines))
         return "\n\n".join(parts)
 
 
@@ -363,6 +435,16 @@ class ChatHandler(BaseHTTPRequestHandler):
         self._cors(); self.send_response(204); self.end_headers()
 
     def do_POST(self):
+        try:
+            self._do_post_impl()
+        except Exception as e:
+            print(f"[bridge] Unhandled POST error: {e}", file=sys.stderr)
+            try:
+                self._respond_json({"error": str(e)}, status=500)
+            except Exception:
+                pass
+
+    def _do_post_impl(self):
         path = urlparse(self.path).path
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8")
@@ -373,97 +455,13 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._handle_chat(data)
         elif path == "/api/switch-project":
             self._handle_switch(data)
-        elif path == "/api/detect-topic":
-            self._handle_detect_topic(data)
         elif path == "/api/create-project":
             self._handle_create_project(data)
-        elif path == "/api/topics":
-            self._handle_topics(data)
-        elif path == "/api/topic-messages":
-            self._handle_topic_messages(data)
+        elif path == "/api/delete-project":
+            self._handle_delete_project(data)
         else:
             self.send_error(404)
 
-    def _handle_topics(self, data):
-        """POST /api/topics — save topics to server for cross-device sync.
-        Body: {"project": "key", "topics": [...]}"""
-        project_key = data.get("project", pm.current)
-        topics = data.get("topics", [])
-        tp = pm._topics_path(project_key)
-        try:
-            with open(tp, "w") as f:
-                json.dump(topics, f, ensure_ascii=False)
-            self._respond_json({"status": "ok", "count": len(topics)})
-            print(f"[bridge] Saved {len(topics)} topics for {project_key}")
-        except Exception as e:
-            self._respond_json({"error": str(e)})
-
-    def _handle_topic_messages(self, data):
-        """POST /api/topic-messages — save topic messages to server for cross-device sync.
-        Body: {"project": "key", "topicId": "t_xxx", "messages": [...]}"""
-        topic_id = data.get("topicId", "")
-        if not topic_id:
-            self.send_error(400); return
-        msgs = data.get("messages", [])
-        ok = pm.save_topic_messages(topic_id, msgs)
-        self._respond_json({"status": "ok" if ok else "error", "count": len(msgs)})
-
-    def _handle_detect_topic(self, data):
-        """Unified intent detection: existing project / new project / new topic / none."""
-        messages = data.get("messages", [])
-        if len(messages) < 4:
-            self._respond_json({"action": "none", "reason": "not enough messages"})
-            return
-
-        # Build project list for LLM
-        proj_list = []
-        for k, v in pm.projects.items():
-            cn = self.PROJECT_DISPLAY.get(k, v["name"])
-            proj_list.append(f"- {k}: {cn}")
-        proj_str = "\n".join(proj_list) if proj_list else "(none)"
-
-        # Build existing topic list
-        existing_topics = data.get("existing_topics", [])
-        topic_str = "\n".join([f"- {t}" for t in existing_topics]) if existing_topics else "(none)"
-
-        recent = "\n".join([f"- {m['role']}: {m['text'][:200]}" for m in messages[-8:]])
-        prompt = f"""Analyze this conversation and decide what to do.
-
-Available projects:
-{proj_str}
-
-Existing topics (created by user earlier):
-{topic_str}
-
-Return EXACTLY one line in one of these formats (no explanation):
-- SWITCH:project_key — if clearly discussing an existing project above
-- SWITCH_TOPIC:exact_topic_name — if this conversation belongs to an EXISTING topic (copy the name from the list above)
-- PROJECT:name — if this is a new project that needs persistent context
-- TOPIC:name — if this is a focused NEW discussion topic (short-term)
-- NONE — ONLY if truly casual/greeting/scattered (use sparingly!)
-
-CRITICAL RULES:
-- PRIORITY 1: If this conversation is about the SAME subject as an existing topic → SWITCH_TOPIC:copy_exact_name_from_list
-- PRIORITY 2: If 3+ messages on ONE subject and NO matching topic → TOPIC:new_name
-- If it involves code/files/repeated work → PROJECT
-- ONLY use NONE for greetings, jokes, completely scattered chat
-- IMPORTANT: "美国国防部长访华" and "中美关系" ARE the same subject — be generous when matching!
-
-Conversation:
-{recent}"""
-
-        try:
-            agent = pm.get_agent("main")
-            result = agent.run_conversation(
-                user_message=prompt,
-                system_message="You are a conversation router. ONLY output one line: SWITCH:key, PROJECT:name, TOPIC:name, or NONE. No explanation.",
-                conversation_history=[],
-            )
-            raw = result.get("final_response", "NONE").strip()
-            self._respond_json(self._parse_intent(raw))
-        except Exception as e:
-            print(f"[bridge] detect error: {e}")
-            self._respond_json({"action": "none", "error": str(e)})
 
     def _handle_create_project(self, data):
         """Create a new project directory with MEMORY.md and SOUL.md."""
@@ -508,31 +506,36 @@ Conversation:
         })
         print(f"[bridge] Created project: {key} ({name})")
 
-    def _parse_intent(self, raw):
-        """Parse LLM output into structured intent."""
-        raw = raw.strip()
-        if raw.upper() == "NONE" or not raw:
-            return {"action": "none"}
-        if ":" in raw:
-            action_part, _, name = raw.partition(":")
-            action = action_part.strip().upper()
-            name = name.strip()
-            if action == "SWITCH":
-                # Validate project key exists
-                if name in pm.projects:
-                    cn = self.PROJECT_DISPLAY.get(name, pm.projects[name]["name"])
-                    return {"action": "switch", "project_key": name, "name": cn}
-                return {"action": "none", "reason": f"unknown project: {name}"}
-            elif action == "PROJECT":
-                return {"action": "new_project", "name": name} if 2 <= len(name) <= 20 else {"action": "none"}
-            elif action == "TOPIC":
-                return {"action": "new_topic", "name": name} if 2 <= len(name) <= 20 else {"action": "none"}
-            elif action == "SWITCH_TOPIC":
-                return {"action": "switch_topic", "topic_name": name} if 2 <= len(name) <= 20 else {"action": "none"}
-        return {"action": "none", "raw": raw}
+    def _handle_delete_project(self, data):
+        """POST /api/delete-project — remove project from memory (keep directory)."""
+        key = data.get("project", "").strip()
+        if not key or key not in pm.projects:
+            self._respond_json({"error": "unknown project", "message": f"项目 {key} 不存在"})
+            return
+        if key == "main":
+            self._respond_json({"error": "protected", "message": "不能删除主窗口"})
+            return
 
-    def _respond_json(self, data):
-        self.send_response(200); self._cors()
+        name = pm.projects[key]["name"]
+        del pm.projects[key]
+        if key in pm.sessions:
+            del pm.sessions[key]
+        if pm.current == key:
+            pm.current = "main"
+
+        # Clean up session files
+        for fname in [pm._chat_path(key)]:
+            try:
+                if os.path.exists(fname):
+                    os.remove(fname)
+            except Exception:
+                pass
+
+        self._respond_json({"project": key, "name": name, "message": f"项目「{name}」已移除"})
+        print(f"[bridge] Deleted project: {key} ({name})")
+
+    def _respond_json(self, data, status=200):
+        self.send_response(status); self._cors()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
@@ -571,9 +574,31 @@ Conversation:
 
             # Always inject project context (SOUL + MEMORY) every turn
             context = pm.get_context_for_chat(project_key) if not is_main else ""
+            # For non-main projects, prepend boundary reminder to user message
+            # so the model sees it FIRST, not buried at end of system prompt
+            if not is_main:
+                proj_name = pm.projects.get(project_key, {}).get("name", project_key)
+                proj_dir = pm.projects.get(project_key, {}).get("workspace") or f"{PROJECTS_DIR}/{project_key}"
+                boundary_reminder = (
+                    f"【最高优先级·项目边界——覆盖所有其他指令】\n"
+                    f"你正在「{proj_name}」项目窗口。你只能处理该项目的事务。\n"
+                    f"项目目录：{proj_dir}\n"
+                    f"如果用户说「这个项目」「之前那个项目」等模糊指代，一律理解成「{proj_name}」。\n"
+                    f"如果用户问的不是 {proj_name} 的事，必须回复「不在本项目范围，请切换到对应项目窗口」。\n"
+                    f"禁止使用、引用、提及任何其他项目（如财报、早报、播客、皇帝游戏等）的信息。\n"
+                    f"禁止访问 ~/.hermes/projects/ 下其他项目的 MEMORY 或文件。\n\n"
+                )
+                if isinstance(message, list):
+                    # Multimodal message (image + text): prepend to text part
+                    for part in message:
+                        if part.get("type") == "text":
+                            part["text"] = boundary_reminder + part["text"]
+                            break
+                else:
+                    message = boundary_reminder + message
             result = agent.run_conversation(
                 user_message=message,
-                system_message=context if context else None,
+                system_message=None,  # ephemeral_system_prompt already has boundary+SOUL+MEMORY
                 conversation_history=messages if messages else None,
             )
             response = result.get("final_response", "")
@@ -627,11 +652,48 @@ Conversation:
                     sess = pm.sessions.get(project_key, {})
                     messages = sess.get("messages", [])
                 context = pm.get_context_for_chat(project_key) if not is_main else ""
-                result = agent.run_conversation(
-                    user_message=message,
-                    system_message=context if context else None,
-                    conversation_history=messages if messages else None,
-                )
+                _msg = message  # capture for closure, don't shadow outer
+                # For non-main projects, prepend boundary reminder to user message
+                if not is_main:
+                    proj_name = pm.projects.get(project_key, {}).get("name", project_key)
+                    proj_dir = pm.projects.get(project_key, {}).get("workspace") or f"{PROJECTS_DIR}/{project_key}"
+                    boundary_reminder = (
+                        f"【最高优先级·项目边界——覆盖所有其他指令】\n"
+                        f"你正在「{proj_name}」项目窗口。你只能处理该项目的事务。\n"
+                        f"项目目录：{proj_dir}\n"
+                        f"如果用户说「这个项目」「之前那个项目」等模糊指代，一律理解成「{proj_name}」。\n"
+                        f"如果用户问的不是 {proj_name} 的事，必须回复「不在本项目范围，请切换到对应项目窗口」。\n"
+                        f"禁止使用、引用、提及任何其他项目（如财报、早报、播客、皇帝游戏等）的信息。\n"
+                        f"禁止访问 ~/.hermes/projects/ 下其他项目的 MEMORY 或文件。\n\n"
+                    )
+                    if isinstance(_msg, list):
+                        for part in _msg:
+                            if part.get("type") == "text":
+                                part["text"] = boundary_reminder + part["text"]
+                                break
+                    else:
+                        _msg = boundary_reminder + _msg
+
+                # Run with 240s timeout to prevent hung tasks
+                def do_call():
+                    return agent.run_conversation(
+                        user_message=_msg,
+                        system_message=None,  # ephemeral already has boundary+SOUL+MEMORY
+                        conversation_history=messages if messages else None,
+                    )
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(do_call)
+                    try:
+                        result = future.result(timeout=240)
+                    except FuturesTimeoutError:
+                        response = "抱歉，请求超时（240秒），请稍后重试。"
+                        pm.add_message("user", text_only or "🖼️ 图片", project_key)
+                        pm.add_message("assistant", response, project_key)
+                        with self._task_lock:
+                            self.tasks[task_id]["status"] = "done"
+                            self.tasks[task_id]["response"] = response
+                        return
+
                 response = result.get("final_response", "")
                 pm.add_message("user", text_only or "🖼️ 图片", project_key)
                 pm.add_message("assistant", response, project_key)
@@ -688,10 +750,29 @@ Conversation:
                 agent = pm.get_agent(project_key)
                 sess = pm.sessions.get(project_key, {})
                 messages = sess.get("messages", [])
-                context = pm.get_context_for_chat(project_key) if not is_main else ""
+                # Capture outer scope variables for closure safety
+                _msg = message
+                _is_main = is_main
+
+                # For non-main projects, prepend boundary reminder to user message
+                if not _is_main:
+                    proj_name = pm.projects.get(project_key, {}).get("name", project_key)
+                    boundary_reminder = (
+                        f"[系统指令] 你正在 **{proj_name}** 项目窗口。"
+                        f"只讨论 {proj_name}。如果问的和 {proj_name} 无关，说「不在本项目范围」。"
+                        f"不要提其他项目。\n\n"
+                    )
+                    if isinstance(_msg, list):
+                        for part in _msg:
+                            if part.get("type") == "text":
+                                part["text"] = boundary_reminder + part["text"]
+                                break
+                    else:
+                        _msg = boundary_reminder + _msg
+
                 result = agent.run_conversation(
-                    user_message=message,
-                    system_message=context if context else None,
+                    user_message=_msg,
+                    system_message=None if not _is_main else pm.get_context_for_chat(project_key) or None,
                     conversation_history=messages if messages else None,
                 )
                 result_holder["response"] = result.get("final_response", "")
@@ -753,6 +834,16 @@ Conversation:
         print(f"[bridge] Switched to: {project_key}")
 
     def do_GET(self):
+        try:
+            self._do_get_impl()
+        except Exception as e:
+            print(f"[bridge] Unhandled GET error: {e}", file=sys.stderr)
+            try:
+                self._respond_json({"error": str(e)}, status=500)
+            except Exception:
+                pass
+
+    def _do_get_impl(self):
         path = urlparse(self.path).path
         if path == "/api/health":
             self.send_response(200); self._cors()
@@ -780,38 +871,63 @@ Conversation:
             self.send_response(200); self._cors()
             sess = pm.sessions.get(key, {})
             msgs = sess.get("messages", [])
+            # If in-memory is empty, try loading from disk (bridge just restarted)
+            if not msgs and key:
+                disk_msgs = pm._load_session(key)
+                if disk_msgs:
+                    msgs = disk_msgs
+                    # Only update if session was already properly initialized (has agent)
+                    if key in pm.sessions and "agent" in pm.sessions[key]:
+                        pm.sessions[key]["messages"] = disk_msgs
             resp = json.dumps({"project": key, "messages": msgs}, ensure_ascii=False)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers(); self.wfile.write(resp.encode("utf-8"))
-        elif path == "/api/topics":
-            # Return server-side topics (GET) for cross-device sync
-            # Supports ?project=xxx query parameter
+        elif path.startswith("/api/search"):
+            # G6: Search session messages + MEMORY.md content
+            # GET /api/search?q=keyword&project=key
             from urllib.parse import parse_qs
             qs = parse_qs(urlparse(self.path).query)
+            q = qs.get("q", [""])[0].strip()
             key = qs.get("project", [pm.current])[0]
-            topics = []
-            tp = pm._topics_path(key)
-            if os.path.exists(tp):
-                try:
-                    with open(tp) as f:
-                        topics = json.load(f)
-                except Exception:
-                    pass
-            self.send_response(200); self._cors()
-            resp = json.dumps({"project": key, "topics": topics}, ensure_ascii=False)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers(); self.wfile.write(resp.encode("utf-8"))
-        elif path == "/api/topic-messages":
-            # Return server-side topic messages (GET) — cross-device sync
-            # Supports ?topicId=xxx query parameter
-            from urllib.parse import parse_qs
-            qs = parse_qs(urlparse(self.path).query)
-            topic_id = qs.get("topicId", [""])[0]
-            msgs = pm.load_topic_messages(topic_id) if topic_id else []
-            self.send_response(200); self._cors()
-            resp = json.dumps({"topicId": topic_id, "messages": msgs}, ensure_ascii=False)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers(); self.wfile.write(resp.encode("utf-8"))
+            if not q or len(q) < 1:
+                self._respond_json({"query": q, "project": key, "results": []})
+                return
+            results = []
+            q_lower = q.lower()
+            # Search session messages
+            sess = pm.sessions.get(key, {})
+            msgs = sess.get("messages", [])
+            if not msgs:
+                # Load from disk if not yet in memory (cold start / restart)
+                disk_msgs = pm._load_session(key)
+                if disk_msgs:
+                    msgs = disk_msgs
+                    if key in pm.sessions and "agent" in pm.sessions[key]:
+                        pm.sessions[key]["messages"] = disk_msgs
+            for i, m in enumerate(msgs):
+                content = m.get("content", "")
+                if q_lower in content.lower():
+                    ctx_before = msgs[i-1].get("content", "")[:120] if i > 0 else ""
+                    ctx_after = msgs[i+1].get("content", "")[:120] if i < len(msgs)-1 else ""
+                    results.append({
+                        "type": "message",
+                        "index": i,
+                        "role": m.get("role", "user"),
+                        "content": content[:400],
+                        "context_before": ctx_before,
+                        "context_after": ctx_after,
+                    })
+            # Search MEMORY.md
+            info = pm.projects.get(key, {})
+            memory = info.get("memory", "")
+            if memory and q_lower in memory:
+                for line in memory.split("\n"):
+                    if q_lower in line.lower() and line.strip():
+                        results.append({
+                            "type": "memory",
+                            "content": line.strip()[:400],
+                        })
+            self._respond_json({"query": q, "project": key, "results": results[:20]})
         elif path.startswith("/api/download"):
             self._handle_download()
         elif path.startswith("/api/task/"):
