@@ -11,7 +11,7 @@ import json, sys, os, threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 # Load .env so tools like web_extract can find API keys (FIRECRAWL_API_KEY, etc.)
 try:
@@ -38,17 +38,57 @@ class ProjectManager:
         self.projects = {}
         self.sessions = {}  # key -> {"agent": AIAgent, "messages": [...]}
         self.current = "main"
+        self.current_topic = None  # active topic id or None
+        self.session_files = {}  # session_key -> [file dicts]
+        self.topics = {}  # project_key -> [topic dicts]  — server-side persistence
         self._load_projects()
+        self._load_topics("main")
+
+    def _session_key(self, project_key=None, topic_id=None):
+        """Build composite session key: 'project|topic' or 'project'."""
+        pk = project_key or self.current
+        tid = topic_id or self.current_topic
+        return f"{pk}|{tid}" if tid else pk
 
     # ── Project-scoped file paths (chat history lives WITH the project) ──
     def _project_dir(self, key):
-        return os.path.join(PROJECTS_DIR, key)
+        # Strip topic suffix for directory lookup
+        base = key.split("|")[0] if "|" in key else key
+        return os.path.join(PROJECTS_DIR, base)
 
     def _chat_path(self, key):
+        if "|" in key:
+            proj, topic = key.split("|", 1)
+            return os.path.join(PROJECTS_DIR, proj, f"topic_{topic}_chat.json")
         return os.path.join(self._project_dir(key), "chat_history.json")
 
     def _archive_dir(self, key):
+        if "|" in key:
+            proj, topic = key.split("|", 1)
+            return os.path.join(PROJECTS_DIR, proj, f"topic_{topic}_archive")
         return os.path.join(self._project_dir(key), "archive")
+
+    # ── Topic persistence ──
+    def _topics_path(self, key):
+        return os.path.join(self._project_dir(key), "topics.json")
+
+    def _load_topics(self, key):
+        tp = self._topics_path(key)
+        if os.path.exists(tp):
+            try:
+                with open(tp) as f:
+                    self.topics[key] = json.load(f)
+            except Exception:
+                self.topics[key] = []
+        else:
+            self.topics[key] = []
+
+    def _save_topics(self, key):
+        tp = self._topics_path(key)
+        tmp = tp + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.topics.get(key, []), f, ensure_ascii=False)
+        os.rename(tmp, tp)
 
 
     # ── Chat history persistence (project-scoped, with archive) ──
@@ -144,15 +184,41 @@ class ProjectManager:
                 elif " - " in first_line:
                     display_name = first_line.split(" - ", 1)[1].strip()
 
+            # Load structured memory (v1 white-box); fall back to MEMORY.md
+            structured_memory = self._load_memory_file(name)
+            if structured_memory:
+                memory_text = self._format_memory_for_prompt(structured_memory)
+            else:
+                memory_text = self._read_file(memory_path)
+
             self.projects[name] = {
                 "name": display_name,
-                "memory": self._read_file(memory_path),
+                "memory": memory_text,
+                "memory_items": structured_memory if structured_memory else self._parse_legacy_memory(memory_text),
                 "soul": self._read_file(soul_path),
                 "skills": skills_path if os.path.isdir(skills_path) else None,
                 "workspace": workspace_path if os.path.isdir(workspace_path) else None,
                 "memory_lines": self._count_lines(memory_path),
             }
         print(f"[bridge] Loaded {len(self.projects)} projects: {list(self.projects.keys())}")
+        # Add main project with its workspace
+        main_dir = os.path.join(PROJECTS_DIR, "main")
+        main_ws = os.path.join(main_dir, "workspace")
+        main_memory_path = os.path.join(main_dir, "MEMORY.md")
+        main_structured = self._load_memory_file("main")
+        if main_structured:
+            main_memory_text = self._format_memory_for_prompt(main_structured)
+        else:
+            main_memory_text = self._read_file(main_memory_path)
+        self.projects["main"] = {
+            "name": "主窗口",
+            "memory": main_memory_text,
+            "memory_items": main_structured if main_structured else self._parse_legacy_memory(main_memory_text),
+            "soul": self._read_file(os.path.join(main_dir, "SOUL.md")),
+            "skills": None,
+            "workspace": main_ws if os.path.isdir(main_ws) else os.path.expanduser("~"),
+            "memory_lines": self._count_lines(main_memory_path),
+        }
         # Preload main agent synchronously so first message is fast
         try:
             self.get_agent("main")
@@ -181,6 +247,145 @@ class ProjectManager:
         if path and os.path.isfile(path):
             return len(open(path).readlines())
         return 0
+
+    # ── White-box Memory (v1) ──────────────────────────────────────
+    # Memory architecture inspired by OpenBMB/PilotDeck's white-box
+    # memory design: structured, per-project, with source attribution
+    # and full CRUD. See docs: pilotdeck-advantages-analysis.md
+    # Repo: https://github.com/OpenBMB/PilotDeck
+
+    import uuid as _uuid
+
+    def _memory_path(self, project_key):
+        """Path to structured memory JSON file for a project."""
+        return os.path.join(PROJECTS_DIR, project_key, "memory.json")
+
+    def _load_memory_file(self, project_key):
+        """Load structured memory items from memory.json. Returns list or None."""
+        mp = self._memory_path(project_key)
+        if not os.path.isfile(mp):
+            return None
+        try:
+            with open(mp) as f:
+                items = json.load(f)
+            if isinstance(items, list) and len(items) > 0:
+                return items
+        except Exception:
+            pass
+        return None
+
+    def _save_memory_file(self, project_key, items):
+        """Save structured memory items to memory.json (atomic write)."""
+        mp = self._memory_path(project_key)
+        os.makedirs(os.path.dirname(mp), exist_ok=True)
+        tmp = mp + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+        os.rename(tmp, mp)
+
+    def _parse_legacy_memory(self, text):
+        """Convert legacy MEMORY.md text into structured items.
+        Splits on § or double-newline; each segment becomes one item."""
+        if not text:
+            return []
+        items = []
+        chunks = [s.strip() for s in text.replace("\n§", "\n\n").split("\n\n") if s.strip()]
+        for i, chunk in enumerate(chunks):
+            items.append({
+                "id": f"legacy_{i:03d}",
+                "content": chunk[:500],
+                "source": "迁移自 MEMORY.md",
+                "created_at": "",
+                "updated_at": "",
+                "pinned": False,
+            })
+        return items
+
+    def _format_memory_for_prompt(self, items):
+        """Convert structured memory items back to prompt-compatible text."""
+        if not items:
+            return ""
+        lines = []
+        for item in items:
+            lines.append(item["content"])
+        return "\n§\n".join(lines)
+
+    def get_memories(self, project_key=None):
+        """Return structured memory items for a project."""
+        key = project_key or self.current
+        # Check if already loaded in projects dict
+        if key in self.projects and self.projects[key].get("memory_items") is not None:
+            items = self.projects[key]["memory_items"]
+        else:
+            items = self._load_memory_file(key)
+            if items is None and key in self.projects:
+                items = self._parse_legacy_memory(self.projects[key].get("memory", ""))
+            elif items is None:
+                items = []
+        return items
+
+    def add_memory_item(self, project_key, content, source=""):
+        """Add a new memory item. Returns the created item."""
+        items = self.get_memories(project_key)
+        import datetime as _dt
+        now = _dt.datetime.now().isoformat()
+        item = {
+            "id": f"mem_{str(self._uuid.uuid4())[:8]}",
+            "content": content,
+            "source": source or f"手动添加 · {_dt.datetime.now().strftime('%Y-%m-%d')}",
+            "created_at": now,
+            "updated_at": now,
+            "pinned": False,
+        }
+        # Pinned items first, then newest
+        items.insert(0, item)
+        self._save_memory_file(project_key, items)
+        self.projects[project_key]["memory_items"] = items
+        self.projects[project_key]["memory"] = self._format_memory_for_prompt(items)
+        return item
+
+    def edit_memory_item(self, project_key, item_id, content):
+        """Edit an existing memory item's content. Returns updated item or None."""
+        items = self.get_memories(project_key)
+        import datetime as _dt
+        now = _dt.datetime.now().isoformat()
+        for item in items:
+            if item["id"] == item_id:
+                item["content"] = content
+                item["updated_at"] = now
+                self._save_memory_file(project_key, items)
+                self.projects[project_key]["memory_items"] = items
+                self.projects[project_key]["memory"] = self._format_memory_for_prompt(items)
+                return item
+        return None
+
+    def delete_memory_item(self, project_key, item_id):
+        """Delete a memory item. Returns True if deleted."""
+        items = self.get_memories(project_key)
+        new_items = [item for item in items if item["id"] != item_id]
+        if len(new_items) == len(items):
+            return False
+        self._save_memory_file(project_key, new_items)
+        self.projects[project_key]["memory_items"] = new_items
+        self.projects[project_key]["memory"] = self._format_memory_for_prompt(new_items)
+        return True
+
+    def pin_memory_item(self, project_key, item_id, pinned=True):
+        """Toggle pin status. Pinned items appear first."""
+        items = self.get_memories(project_key)
+        for item in items:
+            if item["id"] == item_id:
+                item["pinned"] = pinned
+                # Sort: pinned first, then by created_at desc
+                items.sort(key=lambda x: (not x.get("pinned", False), x.get("created_at", "")), reverse=False)
+                # Re-sort so pinned are first
+                pinned_items = [i for i in items if i.get("pinned")]
+                unpinned = [i for i in items if not i.get("pinned")]
+                sorted_items = pinned_items + sorted(unpinned, key=lambda x: x.get("created_at", ""), reverse=True)
+                self._save_memory_file(project_key, sorted_items)
+                self.projects[project_key]["memory_items"] = sorted_items
+                return True
+        return False
 
     def switch_to(self, project_key):
         """Switch active project. Returns project info dict."""
@@ -236,6 +441,18 @@ class ProjectManager:
             f"忽略主 persona 中其他项目的知识——那些项目有自己独立的窗口。\n"
             f"只处理和 {project_name} 相关的事务，不要越界处理其他项目。\n"
             f"如果项目本身没有可汇报的内容，就说「目前没有新进展」，不要跳到其他项目找内容。\n"
+            f"\n"
+            f"## ⚠️ 响应模式：分步执行（V4 Pro 防超时——最高优先级）\n"
+            f"\n"
+            f"**覆盖基础指令：** 基础 persona 要求「持续工作直到完成」，但此规则在当前窗口不适用。\n"
+            f"你必须逐步执行——完成一个子步骤后**立即停止工具调用**，输出文字等待用户确认。\n"
+            f"\n"
+            f"Web Chat 用户可能一次发来复杂需求。你必须**像微信对话一样逐步响应**：\n"
+            f"- 每轮必须**实际执行**工具调用，完成后汇报结果——禁止只说「先搜一下」却不调 search_files\n"
+            f"- **完成一个步骤后停止**：不再发起新的工具调用，用文字告诉用户「这一步完成了，需要我继续吗？」\n"
+            f"- 不要试图在一轮里完成所有步骤——推理时间过长会触发超时\n"
+            f"- 每轮工具调用控制在 3-5 个以内，响应文字保持精炼\n"
+            f"- 如果任务需要多步，先列出 todo，然后**立刻执行第一步**，不要停在计划阶段\n"
         )
         if project_key != "main":
             workspace = info.get("workspace")
@@ -255,15 +472,17 @@ class ProjectManager:
             provider=PROVIDER,
             base_url=BASE_URL,
             api_key=API_KEY,
-            max_iterations=20,  # Web chat doesn't need 30+ rounds; 20 balances depth vs timeout
+            max_iterations=40,  # V4 Pro needs headroom for reasoning; 40 rounds with step-by-step
             skip_memory=True,  # Skip global memory, we inject project memory
             ephemeral_system_prompt=context,
             disabled_toolsets=[],
         )
         return agent
 
-    def add_message(self, role, text, project_key=None):
+    def add_message(self, role, text, project_key=None, topic_id=None):
         key = project_key or self.current
+        if topic_id:
+            key = self._session_key(key, topic_id)
         if key not in self.sessions:
             self.get_agent(key)  # ensure session exists
         self.sessions[key]["messages"].append({"role": role, "content": text})
@@ -273,18 +492,43 @@ class ProjectManager:
         # Persist to project dir (chat_history.json + archive/)
         self._save_session(key)
 
-    def get_context_data(self, project_key=None):
+    def get_context_data(self, project_key=None, topic_id=None):
         """Return structured context for UI display."""
         key = project_key or self.current
-        if key == "main" or key not in self.projects:
-            return {"project": "main", "memory_items": [], "files": [], "skills": []}
+        if key not in self.projects:
+            return {"project": key, "memory_items": [], "files": [], "skills": []}
         info = self.projects[key]
+
+        # Topics: isolated context — no memory, no skills, no workspace files
+        if topic_id:
+            sk = self._session_key(key, topic_id)
+            return {
+                "project": key,
+                "name": f"话题 ({topic_id[:8]}…)",
+                "memory_items": [],
+                "files": self.session_files.get(sk, []),
+                "skills": [],
+                "memory_count": 0,
+            }
+
+        # Main window: full context
         # Parse memory into items (split by § or blank lines)
         memory_text = info.get("memory", "")
-        raw_items = [s.strip() for s in memory_text.replace("\n§", "\n\n").split("\n\n") if s.strip()]
-        memory_items = [{"text": item[:200] + ("…" if len(item) > 200 else "")} for item in raw_items[:10]]
+        # Use structured memory if available, otherwise parse legacy
+        memory_items = info.get("memory_items", [])
+        if not memory_items and memory_text:
+            raw_items = [s.strip() for s in memory_text.replace("\n§", "\n\n").split("\n\n") if s.strip()]
+            memory_items = [{"id": f"raw_{i:03d}", "content": item[:200] + ("…" if len(item) > 200 else ""), "source": "", "created_at": "", "pinned": False}
+                           for i, item in enumerate(raw_items[:10])]
         # Scan workspace files
-        files = self._list_files(info.get("workspace")) if info.get("workspace") else []
+        ws = info.get("workspace")
+        files = self._list_files(ws) if ws else []
+        # Append session-generated files (deduplicate by name)
+        sk = self._session_key(key, None)
+        existing_names = {f["name"] for f in files}
+        for sf in self.session_files.get(sk, []):
+            if sf["name"] not in existing_names:
+                files.append(sf)
         # Scan skills
         skills = self._list_files(info.get("skills")) if info.get("skills") else []
         return {
@@ -305,7 +549,7 @@ class ProjectManager:
             fp = os.path.join(dir_path, f)
             if os.path.isfile(fp):
                 size = os.path.getsize(fp)
-                items.append({"name": f, "size": size})
+                items.append({"name": f, "size": size, "path": fp})
             elif os.path.isdir(fp):
                 # If it's a symlink, show its contents instead
                 if os.path.islink(fp):
@@ -321,7 +565,7 @@ class ProjectManager:
                         items.append({"name": f, "size": os.path.getsize(target)})
                 else:
                     items.append({"name": f + "/", "size": 0, "is_dir": True})
-        return sorted(items, key=lambda x: (not x.get("is_dir", False), x["name"]))[:30]
+        return sorted(items, key=lambda x: (not x.get("is_dir", False), x["name"]))[:50]
 
     def get_context_for_chat(self, project_key=None):
         """Build system context string for the current project."""
@@ -412,9 +656,11 @@ def _detect_files(text):
         ext = os.path.splitext(fp)[1].lower()
         if ext in _FILE_EXTENSIONS and os.path.isfile(fp):
             seen.add(fp)
+            size = os.path.getsize(fp)
             files.append({
                 "path": fp,
                 "name": os.path.basename(fp),
+                "size": size,
                 "type": "image" if ext in {".png", ".jpg", ".jpeg", ".gif", ".svg"} else "file"
             })
     return files
@@ -459,9 +705,166 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._handle_create_project(data)
         elif path == "/api/delete-project":
             self._handle_delete_project(data)
+        elif path == "/api/topic-migrate":
+            self._handle_topic_migrate(data)
+        elif path == "/api/topics":
+            self._handle_topics(data)
+        elif path == "/api/memory":
+            self._handle_memory(data)
         else:
             self.send_error(404)
 
+
+    def _handle_topic_migrate(self, data):
+        """Migrate existing main-session messages to a topic session.
+        Call with POST {topic_id: 't_xxx'}. Messages 0-13 from chat_history
+        (the 跨境互联网券商 research conversation) are copied to main|topic_id.
+        Also copies matching archive messages."""
+        topic_id = data.get("topic_id", "").strip()
+        if not topic_id or topic_id == "null":
+            self._respond_json({"error": "missing topic_id"}, status=400); return
+
+        sk = pm._session_key("main", topic_id)
+        # Read main session messages
+        sp = pm._chat_path("main")
+        all_msgs = []
+        if os.path.exists(sp):
+            try:
+                with open(sp) as f:
+                    all_msgs = json.load(f)
+            except Exception:
+                pass
+        # Also load archive
+        ad = pm._archive_dir("main")
+        if os.path.isdir(ad):
+            for fn in sorted(os.listdir(ad)):
+                if fn.endswith(".json"):
+                    try:
+                        with open(os.path.join(ad, fn)) as f:
+                            all_msgs = json.load(f) + all_msgs
+                    except Exception:
+                        pass
+
+        # Filter: messages 0-13 of chat_history are the topic conversation
+        # (identified by topic about 跨境互联网券商整治研究)
+        topic_msgs = []
+        in_topic = False
+        for m in all_msgs:
+            content = m.get("content", "")
+            if "跨境互联网券商" in content or "富途" in content or "老虎" in content or "长桥" in content:
+                in_topic = True
+            if in_topic:
+                topic_msgs.append(m)
+            if "研究报告" in content and m.get("role") == "assistant":
+                # Last message of topic conversation
+                break
+
+        if not topic_msgs:
+            self._respond_json({"error": "no topic messages found to migrate", "migrated": 0}, status=200); return
+
+        # Write to topic session
+        if "main" not in pm.sessions:
+            pm.sessions["main"] = {}
+        pm.sessions[sk] = {"messages": topic_msgs, "agent": None}
+        pm._save_session(sk)
+        print(f"[bridge] Migrated {len(topic_msgs)} messages to session {sk}", flush=True)
+        self._respond_json({"migrated": len(topic_msgs), "session_key": sk})
+
+    def _handle_topics(self, data):
+        """POST /api/topics — create/delete/update topics server-side.
+        Actions: create {name}, delete {id}, update {id, name}."""
+        import time as _time
+        action = data.get("action", "create")
+        proj = data.get("project", pm.current)
+
+        if proj not in pm.topics:
+            pm._load_topics(proj)
+        topics = pm.topics.setdefault(proj, [])
+
+        if action == "create":
+            name = data.get("name", "").strip()
+            if not name or len(name) < 2 or len(name) > 20:
+                self._respond_json({"error": "invalid name"}, status=400); return
+            if any(t["name"] == name for t in topics):
+                self._respond_json({"error": "duplicate name"}, status=409); return
+            tid = "t_" + str(int(_time.time() * 1000))
+            topic = {"id": tid, "name": name, "createdAt": _time.strftime("%Y-%m-%dT%H:%M:%S")}
+            topics.append(topic)
+            pm._save_topics(proj)
+            self._respond_json({"topic": topic, "project": proj})
+
+        elif action == "delete":
+            tid = data.get("id", "")
+            if not tid:
+                self._respond_json({"error": "missing id"}, status=400); return
+            before = len(topics)
+            pm.topics[proj] = [t for t in topics if t["id"] != tid]
+            if len(pm.topics[proj]) == before:
+                self._respond_json({"error": "not found"}, status=404); return
+            pm._save_topics(proj)
+            self._respond_json({"deleted": tid, "project": proj})
+
+        elif action == "update":
+            tid = data.get("id", "")
+            name = data.get("name", "").strip()
+            if not tid or not name:
+                self._respond_json({"error": "missing id or name"}, status=400); return
+            for t in topics:
+                if t["id"] == tid:
+                    t["name"] = name
+                    pm._save_topics(proj)
+                    self._respond_json({"topic": t, "project": proj}); return
+            self._respond_json({"error": "not found"}, status=404)
+
+        else:
+            self._respond_json({"error": f"unknown action: {action}"}, status=400)
+
+    def _handle_memory(self, data):
+        """POST /api/memory — CRUD for white-box memory."""
+        action = data.get("action", "list")
+        project_key = data.get("project", pm.current)
+
+        if action == "list":
+            items = pm.get_memories(project_key)
+            self._respond_json({"items": items, "project": project_key, "count": len(items)})
+        elif action == "add":
+            content = data.get("content", "").strip()
+            source = data.get("source", "").strip()
+            if not content:
+                self._respond_json({"error": "content required"}, status=400); return
+            item = pm.add_memory_item(project_key, content, source)
+            self._respond_json({"item": item, "message": "记忆已添加"})
+        elif action == "edit":
+            item_id = data.get("id", "").strip()
+            content = data.get("content", "").strip()
+            if not item_id or not content:
+                self._respond_json({"error": "id and content required"}, status=400); return
+            item = pm.edit_memory_item(project_key, item_id, content)
+            if item:
+                self._respond_json({"item": item, "message": "记忆已更新"})
+            else:
+                self._respond_json({"error": "item not found"}, status=404)
+        elif action == "delete":
+            item_id = data.get("id", "").strip()
+            if not item_id:
+                self._respond_json({"error": "id required"}, status=400); return
+            ok = pm.delete_memory_item(project_key, item_id)
+            if ok:
+                self._respond_json({"message": "记忆已删除"})
+            else:
+                self._respond_json({"error": "item not found"}, status=404)
+        elif action == "pin":
+            item_id = data.get("id", "").strip()
+            pinned = data.get("pinned", True)
+            if not item_id:
+                self._respond_json({"error": "id required"}, status=400); return
+            ok = pm.pin_memory_item(project_key, item_id, pinned)
+            if ok:
+                self._respond_json({"message": "置顶状态已更新"})
+            else:
+                self._respond_json({"error": "item not found"}, status=404)
+        else:
+            self._respond_json({"error": f"unknown action: {action}"}, status=400)
 
     def _handle_create_project(self, data):
         """Create a new project directory with MEMORY.md and SOUL.md."""
@@ -607,14 +1010,17 @@ class ChatHandler(BaseHTTPRequestHandler):
             print(f"[bridge] Error: {e}")
             response = f"抱歉，出错了：{e}"
 
-        pm.add_message("user", text_only or "🖼️ 图片", project_key)
-        pm.add_message("assistant", response, project_key)
+        pm.add_message("user", text_only or "🖼️ 图片", project_key, data.get("topic_id"))
+        pm.add_message("assistant", response, project_key, data.get("topic_id"))
 
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
-        self.wfile.write(json.dumps({"response": response, "files": _detect_files(response), "project": project_key}, ensure_ascii=False).encode("utf-8"))
+        files = _detect_files(response)
+        sk = pm._session_key(project_key, data.get("topic_id"))
+        pm.session_files.setdefault(sk, []).extend(files)
+        self.wfile.write(json.dumps({"response": response, "files": files, "project": project_key}, ensure_ascii=False).encode("utf-8"))
 
     def _handle_chat_polling(self, data):
         """Polling mode: create a task, run agent in background, return task_id immediately.
@@ -664,7 +1070,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                         f"如果用户说「这个项目」「之前那个项目」等模糊指代，一律理解成「{proj_name}」。\n"
                         f"如果用户问的不是 {proj_name} 的事，必须回复「不在本项目范围，请切换到对应项目窗口」。\n"
                         f"禁止使用、引用、提及任何其他项目（如财报、早报、播客、皇帝游戏等）的信息。\n"
-                        f"禁止访问 ~/.hermes/projects/ 下其他项目的 MEMORY 或文件。\n\n"
+                        f"禁止访问 ~/.hermes/projects/ 下其他项目的 MEMORY 或文件。\n"
+                        f"\n"
+                        f"【分步响应——防超时】覆盖「持续工作直到完成」。完成一个步骤后停止工具调用，用文字报告结果并询问是否继续。禁止连续多轮不确认。\n"
                     )
                     if isinstance(_msg, list):
                         for part in _msg:
@@ -674,7 +1082,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                     else:
                         _msg = boundary_reminder + _msg
 
-                # Run with 240s timeout to prevent hung tasks
+                # Run with 900s timeout — V4 Pro reasoning can spike to 500s per call
                 def do_call():
                     return agent.run_conversation(
                         user_message=_msg,
@@ -684,23 +1092,26 @@ class ChatHandler(BaseHTTPRequestHandler):
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(do_call)
                     try:
-                        result = future.result(timeout=240)
+                        result = future.result(timeout=900)
                     except FuturesTimeoutError:
-                        response = "抱歉，请求超时（240秒），请稍后重试。"
-                        pm.add_message("user", text_only or "🖼️ 图片", project_key)
-                        pm.add_message("assistant", response, project_key)
+                        response = "抱歉，请求超时（900秒），请稍后重试。"
+                        pm.add_message("user", text_only or "🖼️ 图片", project_key, data.get("topic_id"))
+                        pm.add_message("assistant", response, project_key, data.get("topic_id"))
                         with self._task_lock:
                             self.tasks[task_id]["status"] = "done"
                             self.tasks[task_id]["response"] = response
                         return
 
                 response = result.get("final_response", "")
-                pm.add_message("user", text_only or "🖼️ 图片", project_key)
-                pm.add_message("assistant", response, project_key)
+                pm.add_message("user", text_only or "🖼️ 图片", project_key, data.get("topic_id"))
+                pm.add_message("assistant", response, project_key, data.get("topic_id"))
                 with self._task_lock:
                     self.tasks[task_id]["status"] = "done"
                     self.tasks[task_id]["response"] = response
-                    self.tasks[task_id]["files"] = _detect_files(response)
+                    detected = _detect_files(response)
+                    self.tasks[task_id]["files"] = detected
+                    sk = pm._session_key(project_key, data.get("topic_id"))
+                    pm.session_files.setdefault(sk, []).extend(detected)
             except Exception as e:
                 print(f"[bridge] Task {task_id} error: {e}")
                 with self._task_lock:
@@ -802,16 +1213,18 @@ class ChatHandler(BaseHTTPRequestHandler):
         t.join(timeout=1)
 
         # Record messages
-        pm.add_message("user", text_only or "🖼️ 图片", project_key)
+        pm.add_message("user", text_only or "🖼️ 图片", project_key, data.get("topic_id"))
         if result_holder["error"]:
             response = f"抱歉，出错了：{result_holder['error']}"
             sse_send(self, "error", {"message": response})
         else:
             response = result_holder["response"]
-            pm.add_message("assistant", response, project_key)
+            pm.add_message("assistant", response, project_key, data.get("topic_id"))
             sse_send(self, "done", {"response": response, "project": project_key})
             # Send files if detected
             files = _detect_files(response)
+            sk = pm._session_key(project_key, data.get("topic_id"))
+            pm.session_files.setdefault(sk, []).extend(files)
             if files:
                 sse_send(self, "files", {"files": files})
 
@@ -856,18 +1269,42 @@ class ChatHandler(BaseHTTPRequestHandler):
             resp = json.dumps({"projects": proj_list, "current": pm.current}, ensure_ascii=False)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers(); self.wfile.write(resp.encode("utf-8"))
+        elif path == "/api/topics":
+            self.send_response(200); self._cors()
+            from urllib.parse import parse_qs as _pqs2
+            qs2 = _pqs2(urlparse(self.path).query)
+            proj = qs2.get("project", [pm.current])[0]
+            # Ensure loaded
+            if proj not in pm.topics:
+                pm._load_topics(proj)
+            resp = json.dumps({"topics": pm.topics.get(proj, []), "project": proj}, ensure_ascii=False)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers(); self.wfile.write(resp.encode("utf-8"))
+        elif path == "/api/memory":
+            self.send_response(200); self._cors()
+            from urllib.parse import parse_qs as _pqm
+            qsm = _pqm(urlparse(self.path).query)
+            proj = qsm.get("project", [pm.current])[0]
+            items = pm.get_memories(proj)
+            resp = json.dumps({"items": items, "project": proj, "count": len(items)}, ensure_ascii=False)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers(); self.wfile.write(resp.encode("utf-8"))
         elif path == "/api/context":
             self.send_response(200); self._cors()
-            data = pm.get_context_data()
+            from urllib.parse import parse_qs as _pqs
+            qs = _pqs(urlparse(self.path).query)
+            data = pm.get_context_data(topic_id=qs.get("topic_id", [None])[0])
             resp = json.dumps(data, ensure_ascii=False)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers(); self.wfile.write(resp.encode("utf-8"))
         elif path == "/api/messages":
-            # Return server-side session messages (for recovery when localStorage is lost)
-            # Supports ?project=xxx query parameter
+            # Return server-side session messages
+            # Supports ?project=xxx&topic_id=xxx query parameters
             from urllib.parse import parse_qs
             qs = parse_qs(urlparse(self.path).query)
-            key = qs.get("project", [pm.current])[0]
+            proj = qs.get("project", [pm.current])[0]
+            tid = qs.get("topic_id", [None])[0]
+            key = pm._session_key(proj, tid) if tid else proj
             self.send_response(200); self._cors()
             sess = pm.sessions.get(key, {})
             msgs = sess.get("messages", [])
