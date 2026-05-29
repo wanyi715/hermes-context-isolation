@@ -27,10 +27,10 @@ PROJECTS_DIR = os.path.expanduser("~/.hermes/projects")
 GLOBAL_MEMORY = os.path.expanduser("~/.hermes/memories/MEMORY.md")
 GLOBAL_SKILLS = os.path.expanduser("~/.hermes/skills")
 
-MODEL = os.environ.get("HERMES_MODEL", "deepseek-chat")
+MODEL = os.environ.get("HERMES_MODEL", "mimo-v2.5")
 PROVIDER = "custom"
-BASE_URL = "https://api.deepseek.com"
-API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+BASE_URL = os.environ.get("HERMES_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+API_KEY = os.environ.get("MIMO_API_KEY", "your-api-key-here")
 
 # ── Project manager ────────────────────────────────────────────
 class ProjectManager:
@@ -41,6 +41,7 @@ class ProjectManager:
         self.current_topic = None  # active topic id or None
         self.session_files = {}  # session_key -> [file dicts]
         self.topics = {}  # project_key -> [topic dicts]  — server-side persistence
+        self._lock = threading.Lock()  # protects sessions, session_files, topics mutations
         self._load_projects()
         self._load_topics("main")
 
@@ -129,8 +130,8 @@ class ProjectManager:
                 with open(ap + ".tmp", "w") as f:
                     json.dump(merged, f, ensure_ascii=False)
                 os.rename(ap + ".tmp", ap)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[bridge] _save_session({key}) error: {e}", flush=True)
 
     def _load_session(self, key):
         """Restore session from project dir (chat_history.json + archives)."""
@@ -154,8 +155,8 @@ class ProjectManager:
                         except Exception:
                             pass
             return all_msgs
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[bridge] _load_session({key}) error: {e}", flush=True)
         return []
 
     def _load_projects(self):
@@ -486,9 +487,9 @@ class ProjectManager:
         if key not in self.sessions:
             self.get_agent(key)  # ensure session exists
         self.sessions[key]["messages"].append({"role": role, "content": text})
-        # Keep up to 100 in memory; _save_session archives older to archive/
-        if len(self.sessions[key]["messages"]) > 100:
-            self.sessions[key]["messages"] = self.sessions[key]["messages"][-100:]
+        # Keep up to MAX_RECENT in memory; _save_session archives older to archive/
+        if len(self.sessions[key]["messages"]) > self.MAX_RECENT:
+            self.sessions[key]["messages"] = self.sessions[key]["messages"][-self.MAX_RECENT:]
         # Persist to project dir (chat_history.json + archive/)
         self._save_session(key)
 
@@ -608,16 +609,17 @@ pm = ProjectManager()
 
 def _build_user_message(data):
     """Build user_message from request data.
-    If an image is attached, return a multimodal content array
-    (Hermes natively supports this — see codex_responses_adapter.py).
-    Otherwise return a plain string.
-    """
+    If images are attached, return a multimodal content array.
+    Supports both 'image' (single) and 'images' (array) fields."""
     text = data.get("message", "").strip()
-    image = data.get("image")
-    if image:
-        parts = []
-        parts.append({"type": "text", "text": text or "请看这张图片"})
-        parts.append({"type": "image_url", "image_url": {"url": image}})
+    images = data.get("images") or []
+    single = data.get("image")
+    if single and not images:
+        images = [single]
+    if images:
+        parts = [{"type": "text", "text": text or "请看这张图片"}]
+        for img in images:
+            parts.append({"type": "image_url", "image_url": {"url": img}})
         return parts
     return text
 
@@ -665,6 +667,59 @@ def _detect_files(text):
             })
     return files
 
+
+def _build_boundary_reminder(project_key, topic_id=None, step_by_step=False):
+    """Build boundary reminder text. Shared across all chat modes.
+    For topics: lighter reminder (topic context, not full project boundary).
+    For projects: full boundary with directory and scope restriction.
+    step_by_step: if True, append V4 Pro anti-timeout instruction."""
+    proj_name = pm.projects.get(project_key, {}).get("name", project_key)
+    proj_dir = pm.projects.get(project_key, {}).get("workspace") or f"{PROJECTS_DIR}/{project_key}"
+
+    if topic_id:
+        # Topics: lightweight — just identify the topic context
+        topic_name = "话题"
+        for t in pm.topics.get(project_key, []):
+            if t.get("id") == topic_id:
+                topic_name = t.get("name", "话题")
+                break
+        text = (
+            f"[系统指令] 你正在「{proj_name}」项目的「{topic_name}」话题窗口。"
+            f"当前对话属于该话题，请围绕该话题内容回复。\n\n"
+        )
+    else:
+        # Projects: full boundary
+        text = (
+            f"【最高优先级·项目边界——覆盖所有其他指令】\n"
+            f"你正在「{proj_name}」项目窗口。你只能处理该项目的事务。\n"
+            f"项目目录：{proj_dir}\n"
+            f"如果用户说「这个项目」「之前那个项目」等模糊指代，一律理解成「{proj_name}」。\n"
+            f"如果用户问的不是 {proj_name} 的事，必须回复「不在本项目范围，请切换到对应项目窗口」。\n"
+            f"禁止使用、引用、提及任何其他项目的信息。\n"
+            f"禁止访问 ~/.hermes/projects/ 下其他项目的 MEMORY 或文件。\n\n"
+        )
+
+    if step_by_step:
+        text += (
+            "【分步响应——防超时】覆盖「持续工作直到完成」。"
+            "完成一个步骤后停止工具调用，用文字报告结果并询问是否继续。禁止连续多轮不确认。\n"
+        )
+
+    return text
+
+
+def _prepend_boundary(message, boundary):
+    """Prepend boundary text to message (handles both str and multimodal list)."""
+    if isinstance(message, list):
+        for part in message:
+            if isinstance(part, dict) and part.get("type") == "text":
+                part["text"] = boundary + part["text"]
+                return message
+        # No text part found — shouldn't happen, but fallback
+        return boundary + str(message)
+    return boundary + message
+
+
 # ── HTTP Handler ───────────────────────────────────────────────
 class ChatHandler(BaseHTTPRequestHandler):
     # Task buffer for polling mode (like iLink Bot's buffer layer)
@@ -705,8 +760,6 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._handle_create_project(data)
         elif path == "/api/delete-project":
             self._handle_delete_project(data)
-        elif path == "/api/topic-migrate":
-            self._handle_topic_migrate(data)
         elif path == "/api/topics":
             self._handle_topics(data)
         elif path == "/api/memory":
@@ -714,61 +767,6 @@ class ChatHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-
-    def _handle_topic_migrate(self, data):
-        """Migrate existing main-session messages to a topic session.
-        Call with POST {topic_id: 't_xxx'}. Messages 0-13 from chat_history
-        (the 跨境互联网券商 research conversation) are copied to main|topic_id.
-        Also copies matching archive messages."""
-        topic_id = data.get("topic_id", "").strip()
-        if not topic_id or topic_id == "null":
-            self._respond_json({"error": "missing topic_id"}, status=400); return
-
-        sk = pm._session_key("main", topic_id)
-        # Read main session messages
-        sp = pm._chat_path("main")
-        all_msgs = []
-        if os.path.exists(sp):
-            try:
-                with open(sp) as f:
-                    all_msgs = json.load(f)
-            except Exception:
-                pass
-        # Also load archive
-        ad = pm._archive_dir("main")
-        if os.path.isdir(ad):
-            for fn in sorted(os.listdir(ad)):
-                if fn.endswith(".json"):
-                    try:
-                        with open(os.path.join(ad, fn)) as f:
-                            all_msgs = json.load(f) + all_msgs
-                    except Exception:
-                        pass
-
-        # Filter: messages 0-13 of chat_history are the topic conversation
-        # (identified by topic about 跨境互联网券商整治研究)
-        topic_msgs = []
-        in_topic = False
-        for m in all_msgs:
-            content = m.get("content", "")
-            if "跨境互联网券商" in content or "富途" in content or "老虎" in content or "长桥" in content:
-                in_topic = True
-            if in_topic:
-                topic_msgs.append(m)
-            if "研究报告" in content and m.get("role") == "assistant":
-                # Last message of topic conversation
-                break
-
-        if not topic_msgs:
-            self._respond_json({"error": "no topic messages found to migrate", "migrated": 0}, status=200); return
-
-        # Write to topic session
-        if "main" not in pm.sessions:
-            pm.sessions["main"] = {}
-        pm.sessions[sk] = {"messages": topic_msgs, "agent": None}
-        pm._save_session(sk)
-        print(f"[bridge] Migrated {len(topic_msgs)} messages to session {sk}", flush=True)
-        self._respond_json({"migrated": len(topic_msgs), "session_key": sk})
 
     def _handle_topics(self, data):
         """POST /api/topics — create/delete/update topics server-side.
@@ -910,7 +908,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         print(f"[bridge] Created project: {key} ({name})")
 
     def _handle_delete_project(self, data):
-        """POST /api/delete-project — remove project from memory (keep directory)."""
+        """POST /api/delete-project — remove project completely (directory + state)."""
         key = data.get("project", "").strip()
         if not key or key not in pm.projects:
             self._respond_json({"error": "unknown project", "message": f"项目 {key} 不存在"})
@@ -920,22 +918,31 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
 
         name = pm.projects[key]["name"]
-        del pm.projects[key]
-        if key in pm.sessions:
-            del pm.sessions[key]
-        if pm.current == key:
-            pm.current = "main"
 
-        # Clean up session files
-        for fname in [pm._chat_path(key)]:
-            try:
-                if os.path.exists(fname):
-                    os.remove(fname)
-            except Exception:
-                pass
+        # Remove from in-memory state
+        with pm._lock:
+            pm.projects.pop(key, None)
+            pm.sessions.pop(key, None)
+            # Remove all topic sessions for this project
+            for sk in list(pm.sessions.keys()):
+                if sk.startswith(key + "|"):
+                    pm.sessions.pop(sk, None)
+            pm.topics.pop(key, None)
+            if pm.current == key:
+                pm.current = "main"
 
-        self._respond_json({"project": key, "name": name, "message": f"项目「{name}」已移除"})
-        print(f"[bridge] Deleted project: {key} ({name})")
+        # Remove project directory entirely
+        proj_dir = os.path.join(PROJECTS_DIR, key)
+        try:
+            if os.path.isdir(proj_dir):
+                import shutil
+                shutil.rmtree(proj_dir)
+                print(f"[bridge] Removed project directory: {proj_dir}", flush=True)
+        except Exception as e:
+            print(f"[bridge] Error removing {proj_dir}: {e}", flush=True)
+
+        self._respond_json({"project": key, "name": name, "message": f"项目「{name}」已完全删除"})
+        print(f"[bridge] Deleted project: {key} ({name})", flush=True)
 
     def _respond_json(self, data, status=200):
         self.send_response(status); self._cors()
@@ -972,33 +979,17 @@ class ChatHandler(BaseHTTPRequestHandler):
             if custom_history and isinstance(custom_history, list):
                 messages = custom_history
             else:
-                sess = pm.sessions.get(project_key, {})
+                sk = pm._session_key(project_key, data.get("topic_id"))
+                sess = pm.sessions.get(sk, pm.sessions.get(project_key, {}))
                 messages = sess.get("messages", [])
 
             # Always inject project context (SOUL + MEMORY) every turn
             context = pm.get_context_for_chat(project_key) if not is_main else ""
-            # For non-main projects, prepend boundary reminder to user message
+            # For non-main projects/topics, prepend boundary reminder to user message
             # so the model sees it FIRST, not buried at end of system prompt
-            if not is_main:
-                proj_name = pm.projects.get(project_key, {}).get("name", project_key)
-                proj_dir = pm.projects.get(project_key, {}).get("workspace") or f"{PROJECTS_DIR}/{project_key}"
-                boundary_reminder = (
-                    f"【最高优先级·项目边界——覆盖所有其他指令】\n"
-                    f"你正在「{proj_name}」项目窗口。你只能处理该项目的事务。\n"
-                    f"项目目录：{proj_dir}\n"
-                    f"如果用户说「这个项目」「之前那个项目」等模糊指代，一律理解成「{proj_name}」。\n"
-                    f"如果用户问的不是 {proj_name} 的事，必须回复「不在本项目范围，请切换到对应项目窗口」。\n"
-                    f"禁止使用、引用、提及任何其他项目（如财报、早报、播客、皇帝游戏等）的信息。\n"
-                    f"禁止访问 ~/.hermes/projects/ 下其他项目的 MEMORY 或文件。\n\n"
-                )
-                if isinstance(message, list):
-                    # Multimodal message (image + text): prepend to text part
-                    for part in message:
-                        if part.get("type") == "text":
-                            part["text"] = boundary_reminder + part["text"]
-                            break
-                else:
-                    message = boundary_reminder + message
+            if not is_main or data.get("topic_id"):
+                boundary = _build_boundary_reminder(project_key, topic_id=data.get("topic_id"))
+                message = _prepend_boundary(message, boundary)
             result = agent.run_conversation(
                 user_message=message,
                 system_message=None,  # ephemeral_system_prompt already has boundary+SOUL+MEMORY
@@ -1055,32 +1046,15 @@ class ChatHandler(BaseHTTPRequestHandler):
                 if custom_history and isinstance(custom_history, list):
                     messages = custom_history
                 else:
-                    sess = pm.sessions.get(project_key, {})
+                    sk = pm._session_key(project_key, data.get("topic_id"))
+                    sess = pm.sessions.get(sk, pm.sessions.get(project_key, {}))
                     messages = sess.get("messages", [])
                 context = pm.get_context_for_chat(project_key) if not is_main else ""
                 _msg = message  # capture for closure, don't shadow outer
-                # For non-main projects, prepend boundary reminder to user message
-                if not is_main:
-                    proj_name = pm.projects.get(project_key, {}).get("name", project_key)
-                    proj_dir = pm.projects.get(project_key, {}).get("workspace") or f"{PROJECTS_DIR}/{project_key}"
-                    boundary_reminder = (
-                        f"【最高优先级·项目边界——覆盖所有其他指令】\n"
-                        f"你正在「{proj_name}」项目窗口。你只能处理该项目的事务。\n"
-                        f"项目目录：{proj_dir}\n"
-                        f"如果用户说「这个项目」「之前那个项目」等模糊指代，一律理解成「{proj_name}」。\n"
-                        f"如果用户问的不是 {proj_name} 的事，必须回复「不在本项目范围，请切换到对应项目窗口」。\n"
-                        f"禁止使用、引用、提及任何其他项目（如财报、早报、播客、皇帝游戏等）的信息。\n"
-                        f"禁止访问 ~/.hermes/projects/ 下其他项目的 MEMORY 或文件。\n"
-                        f"\n"
-                        f"【分步响应——防超时】覆盖「持续工作直到完成」。完成一个步骤后停止工具调用，用文字报告结果并询问是否继续。禁止连续多轮不确认。\n"
-                    )
-                    if isinstance(_msg, list):
-                        for part in _msg:
-                            if part.get("type") == "text":
-                                part["text"] = boundary_reminder + part["text"]
-                                break
-                    else:
-                        _msg = boundary_reminder + _msg
+                # For non-main projects/topics, prepend boundary reminder to user message
+                if not is_main or data.get("topic_id"):
+                    boundary = _build_boundary_reminder(project_key, topic_id=data.get("topic_id"), step_by_step=True)
+                    _msg = _prepend_boundary(_msg, boundary)
 
                 # Run with 900s timeout — V4 Pro reasoning can spike to 500s per call
                 def do_call():
@@ -1159,27 +1133,18 @@ class ChatHandler(BaseHTTPRequestHandler):
         def run_agent():
             try:
                 agent = pm.get_agent(project_key)
-                sess = pm.sessions.get(project_key, {})
+                sk = pm._session_key(project_key, data.get("topic_id"))
+                sess = pm.sessions.get(sk, pm.sessions.get(project_key, {}))
                 messages = sess.get("messages", [])
                 # Capture outer scope variables for closure safety
                 _msg = message
                 _is_main = is_main
+                _tid = data.get("topic_id")
 
-                # For non-main projects, prepend boundary reminder to user message
-                if not _is_main:
-                    proj_name = pm.projects.get(project_key, {}).get("name", project_key)
-                    boundary_reminder = (
-                        f"[系统指令] 你正在 **{proj_name}** 项目窗口。"
-                        f"只讨论 {proj_name}。如果问的和 {proj_name} 无关，说「不在本项目范围」。"
-                        f"不要提其他项目。\n\n"
-                    )
-                    if isinstance(_msg, list):
-                        for part in _msg:
-                            if part.get("type") == "text":
-                                part["text"] = boundary_reminder + part["text"]
-                                break
-                    else:
-                        _msg = boundary_reminder + _msg
+                # For non-main projects/topics, prepend boundary reminder to user message
+                if not _is_main or _tid:
+                    boundary = _build_boundary_reminder(project_key, topic_id=_tid)
+                    _msg = _prepend_boundary(_msg, boundary)
 
                 result = agent.run_conversation(
                     user_message=_msg,
@@ -1369,9 +1334,90 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._handle_download()
         elif path.startswith("/api/task/"):
             self._handle_task_poll(path)
+        elif path == "/api/session-history":
+            self._handle_session_history()
+        elif path == "/api/session-messages":
+            self._handle_session_messages()
         else:
             self._cors()
             self.send_error(404)
+
+    def _handle_session_history(self):
+        """GET /api/session-history — list recent sessions from Hermes session store."""
+        import glob as _glob
+        sessions_dir = os.path.expanduser("~/.hermes/sessions")
+        sessions = []
+        pattern = os.path.join(sessions_dir, "*.jsonl")
+        for fp in sorted(_glob.glob(pattern), key=os.path.getmtime, reverse=True)[:20]:
+            try:
+                fname = os.path.basename(fp)
+                sid = fname.replace(".jsonl", "")
+                # Read first few lines to get metadata
+                msgs = []
+                with open(fp) as f:
+                    for line in f:
+                        try:
+                            msgs.append(json.loads(line))
+                        except:
+                            pass
+                if not msgs:
+                    continue
+                user_msgs = [m for m in msgs if m.get("role") == "user"]
+                first_user = next((m.get("content", "")[:80] for m in user_msgs if m.get("content")), "")
+                platform = "unknown"
+                for m in msgs:
+                    meta = m.get("metadata", {})
+                    if meta.get("source"):
+                        platform = meta["source"]
+                        break
+                sessions.append({
+                    "session_id": sid,
+                    "date": os.path.getmtime(fp),
+                    "platform": platform,
+                    "preview": first_user,
+                    "message_count": len(msgs),
+                    "user_messages": len(user_msgs),
+                })
+            except Exception:
+                continue
+        # Sort by date descending
+        sessions.sort(key=lambda s: s["date"], reverse=True)
+        # Format dates
+        import datetime as _dt
+        for s in sessions:
+            s["date"] = _dt.datetime.fromtimestamp(s["date"]).strftime("%m/%d %H:%M")
+        self._respond_json({"sessions": sessions})
+
+    def _handle_session_messages(self):
+        """GET /api/session-messages?id=xxx — load messages from a session file."""
+        from urllib.parse import parse_qs as _pqs
+        qs = _pqs(urlparse(self.path).query)
+        sid = qs.get("id", [None])[0]
+        if not sid:
+            self._respond_json({"error": "missing id"}, status=400)
+            return
+        fp = os.path.expanduser(f"~/.hermes/sessions/{sid}.jsonl")
+        if not os.path.isfile(fp):
+            self._respond_json({"error": "session not found"}, status=404)
+            return
+        msgs = []
+        try:
+            with open(fp) as f:
+                for line in f:
+                    try:
+                        m = json.loads(line)
+                        if m.get("role") in ("user", "assistant"):
+                            content = m.get("content", "")
+                            if isinstance(content, list):
+                                # multimodal — extract text parts
+                                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+                            msgs.append({"role": m["role"], "content": content})
+                    except:
+                        pass
+        except Exception as e:
+            self._respond_json({"error": str(e)}, status=500)
+            return
+        self._respond_json({"session_id": sid, "messages": msgs})
 
     def _handle_task_poll(self, path):
         """GET /api/task/{task_id} — poll for task result."""
