@@ -13,9 +13,11 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 
-# Load .env so tools like web_extract can find API keys (FIRECRAWL_API_KEY, etc.)
+# Load .env — local project .env first, then global ~/.hermes/.env
+# API keys (MIMO_API_KEY etc.) live in .env, never hardcoded in source.
 try:
     from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
     load_dotenv(os.path.expanduser("~/.hermes/.env"))
 except ImportError:
     pass
@@ -30,7 +32,7 @@ GLOBAL_SKILLS = os.path.expanduser("~/.hermes/skills")
 MODEL = os.environ.get("HERMES_MODEL", "mimo-v2.5")
 PROVIDER = "custom"
 BASE_URL = os.environ.get("HERMES_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
-API_KEY = os.environ.get("MIMO_API_KEY", "your-api-key-here")
+API_KEY = os.environ["MIMO_API_KEY"]  # required, set in .env
 
 # ── Project manager ────────────────────────────────────────────
 class ProjectManager:
