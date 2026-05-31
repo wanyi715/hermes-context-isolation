@@ -75,7 +75,7 @@
         <div class="pulse-dot"></div>
         <h1>Hermes Context Isolation — Architecture</h1>
       </div>
-      <p class="subtitle">Multi-project LLM conversation isolation via per-project SOUL + MEMORY injection</p>
+      <p class="subtitle">Three-layer LLM conversation isolation — Main Window / Projects / Independent Topics</p>
     </div>
 
     <div class="diagram-container">
@@ -209,23 +209,31 @@
         <!-- ================================================================
              SECTION 3 — ISOLATION MECHANISM DETAIL
              ================================================================ -->
-        <text x="30" y="460" fill="#64748b" font-size="9" font-weight="600">ISOLATION MECHANISM: Two-layer isolation</text>
+        <text x="30" y="460" fill="#64748b" font-size="9" font-weight="600">ISOLATION MECHANISM: Three-layer isolation (Main / Project / Topic)</text>
 
         <!-- Layer 1 -->
-        <rect x="30" y="475" width="450" height="100" rx="8" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1"/>
-        <text x="46" y="495" fill="#34d399" font-size="10" font-weight="600">Layer 1 — API Layer (bridge.py)</text>
-        <text x="46" y="514" fill="#94a3b8" font-size="8">Every /api/chat call:</text>
-        <text x="46" y="530" fill="#94a3b8" font-size="8">1. Read project SOUL.md → append to system_message</text>
-        <text x="46" y="546" fill="#94a3b8" font-size="8">2. Read project MEMORY.md → append to system_message</text>
-        <text x="46" y="562" fill="#94a3b8" font-size="8">3. Send to LLM → LLM sees ONLY this project's context</text>
+        <rect x="30" y="475" width="300" height="100" rx="8" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1"/>
+        <text x="46" y="495" fill="#34d399" font-size="10" font-weight="600">Layer 1 — Main Window</text>
+        <text x="46" y="514" fill="#94a3b8" font-size="8">Default conversation space:</text>
+        <text x="46" y="530" fill="#94a3b8" font-size="8">• session_key = "main"</text>
+        <text x="46" y="546" fill="#94a3b8" font-size="8">• Shares project's SOUL + MEMORY</text>
+        <text x="46" y="562" fill="#94a3b8" font-size="8">• General-purpose Q&A</text>
 
         <!-- Layer 2 -->
-        <rect x="520" y="475" width="450" height="100" rx="8" fill="rgba(76, 29, 149, 0.3)" stroke="#a78bfa" stroke-width="1"/>
-        <text x="536" y="495" fill="#a78bfa" font-size="10" font-weight="600">Layer 2 — Application Layer (Hermes)</text>
-        <text x="536" y="514" fill="#94a3b8" font-size="8">Per-project memory + skills + tools:</text>
-        <text x="536" y="530" fill="#94a3b8" font-size="8">• Global memory is NOT used for project data</text>
-        <text x="536" y="546" fill="#94a3b8" font-size="8">• Each project gets its own MEMORY.md file</text>
-        <text x="536" y="562" fill="#94a3b8" font-size="8">• workspace/ symlinks → real project directory</text>
+        <rect x="350" y="475" width="300" height="100" rx="8" fill="rgba(76, 29, 149, 0.3)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="366" y="495" fill="#a78bfa" font-size="10" font-weight="600">Layer 2 — Projects</text>
+        <text x="366" y="514" fill="#94a3b8" font-size="8">Isolated workspaces:</text>
+        <text x="366" y="530" fill="#94a3b8" font-size="8">• Each project: SOUL.md + MEMORY.md</text>
+        <text x="366" y="546" fill="#94a3b8" font-size="8">• session_key = project name</text>
+        <text x="366" y="562" fill="#94a3b8" font-size="8">• Independent chat history + tools</text>
+
+        <!-- Layer 3 -->
+        <rect x="670" y="475" width="300" height="100" rx="8" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1"/>
+        <text x="686" y="495" fill="#fbbf24" font-size="10" font-weight="600">Layer 3 — Topics (Independent)</text>
+        <text x="686" y="514" fill="#94a3b8" font-size="8">Self-contained conversation spaces:</text>
+        <text x="686" y="530" fill="#94a3b8" font-size="8">• session_key = "topic-{id}"</text>
+        <text x="686" y="546" fill="#94a3b8" font-size="8">• Stored in projects/_topics/</text>
+        <text x="686" y="562" fill="#94a3b8" font-size="8">• Fully isolated from main/projects</text>
 
         <!-- ================================================================
              SECTION 4 — COMPARISON TABLE (in SVG)
@@ -314,13 +322,13 @@
       <div class="card">
         <div class="card-header">
           <div class="card-dot amber"></div>
-          <h3>Two-Layer Isolation</h3>
+          <h3>Three-Layer Isolation</h3>
         </div>
         <ul>
-          <li>• Layer 1: bridge.py — API-level system_message injection</li>
-          <li>• Layer 2: Hermes Agent — per-project memory + tools</li>
-          <li>• Workspace symlinks prevent file-system contamination</li>
-          <li>• Conversation persistence survives bridge restarts</li>
+          <li>• Layer 1: Main Window — default conversation space</li>
+          <li>• Layer 2: Projects — SOUL.md + MEMORY.md per project</li>
+          <li>• Layer 3: Topics — independent conversation spaces</li>
+          <li>• Each layer has its own session_key + chat history</li>
         </ul>
       </div>
 
@@ -331,7 +339,7 @@
         </div>
         <ul>
           <li>• Running on a 1.6GB RAM VPS</li>
-          <li>• 7 projects actively isolated</li>
+          <li>• 8 projects + topics actively isolated</li>
           <li>• Dual entry: Web chat + WeChat</li>
           <li>• Passed multi-round memory contamination tests</li>
         </ul>

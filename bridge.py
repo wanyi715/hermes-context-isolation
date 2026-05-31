@@ -31,7 +31,7 @@ GLOBAL_SKILLS = os.path.expanduser("~/.hermes/skills")
 
 MODEL = os.environ.get("HERMES_MODEL", "mimo-v2.5")
 PROVIDER = "custom"
-BASE_URL = os.environ.get("HERMES_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+BASE_URL = os.environ.get("HERMES_BASE_URL", "https://api.xiaomimimo.com/v1")
 API_KEY = os.environ["MIMO_API_KEY"]  # required, set in .env
 
 # ── Project manager ────────────────────────────────────────────
@@ -42,55 +42,59 @@ class ProjectManager:
         self.current = "main"
         self.current_topic = None  # active topic id or None
         self.session_files = {}  # session_key -> [file dicts]
-        self.topics = {}  # project_key -> [topic dicts]  — server-side persistence
+        self.topics = []  # global topic list (independent of projects) — server-side persistence
         self._lock = threading.Lock()  # protects sessions, session_files, topics mutations
         self._load_projects()
-        self._load_topics("main")
+        self._load_topics()
 
     def _session_key(self, project_key=None, topic_id=None):
-        """Build composite session key: 'project|topic' or 'project'."""
-        pk = project_key or self.current
-        tid = topic_id or self.current_topic
-        return f"{pk}|{tid}" if tid else pk
+        """Build session key. Topics are independent: 'topic-{id}'."""
+        if topic_id:
+            return f"topic-{topic_id}"
+        return project_key or self.current
 
-    # ── Project-scoped file paths (chat history lives WITH the project) ──
+    # ── File paths (chat history lives WITH the entity) ──
+    TOPICS_DIR = os.path.join(PROJECTS_DIR, "_topics")  # global topics storage
+
     def _project_dir(self, key):
-        # Strip topic suffix for directory lookup
-        base = key.split("|")[0] if "|" in key else key
-        return os.path.join(PROJECTS_DIR, base)
+        # Topics use a global _topics directory
+        if key.startswith("topic-"):
+            os.makedirs(self.TOPICS_DIR, exist_ok=True)
+            return self.TOPICS_DIR
+        return os.path.join(PROJECTS_DIR, key)
 
     def _chat_path(self, key):
-        if "|" in key:
-            proj, topic = key.split("|", 1)
-            return os.path.join(PROJECTS_DIR, proj, f"topic_{topic}_chat.json")
+        if key.startswith("topic-"):
+            return os.path.join(self.TOPICS_DIR, f"{key}_chat.json")
         return os.path.join(self._project_dir(key), "chat_history.json")
 
     def _archive_dir(self, key):
-        if "|" in key:
-            proj, topic = key.split("|", 1)
-            return os.path.join(PROJECTS_DIR, proj, f"topic_{topic}_archive")
+        if key.startswith("topic-"):
+            return os.path.join(self.TOPICS_DIR, f"{key}_archive")
         return os.path.join(self._project_dir(key), "archive")
 
-    # ── Topic persistence ──
-    def _topics_path(self, key):
-        return os.path.join(self._project_dir(key), "topics.json")
+    # ── Topic persistence (global, independent of projects) ──
+    def _topics_path(self):
+        return os.path.join(self.TOPICS_DIR, "topics.json")
 
-    def _load_topics(self, key):
-        tp = self._topics_path(key)
+    def _load_topics(self):
+        tp = self._topics_path()
         if os.path.exists(tp):
             try:
                 with open(tp) as f:
-                    self.topics[key] = json.load(f)
+                    data = json.load(f)
+                    self.topics = data if isinstance(data, list) else []
             except Exception:
-                self.topics[key] = []
+                self.topics = []
         else:
-            self.topics[key] = []
+            self.topics = []
 
-    def _save_topics(self, key):
-        tp = self._topics_path(key)
+    def _save_topics(self):
+        os.makedirs(self.TOPICS_DIR, exist_ok=True)
+        tp = self._topics_path()
         tmp = tp + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(self.topics.get(key, []), f, ensure_ascii=False)
+            json.dump(self.topics, f, ensure_ascii=False)
         os.rename(tmp, tp)
 
 
@@ -169,8 +173,8 @@ class ProjectManager:
             path = os.path.join(PROJECTS_DIR, name)
             if not os.path.isdir(path):
                 continue
-            # Skip tracking/hidden dirs
-            if name.startswith(".") or name == "hermes-context-isolation":
+            # Skip tracking/hidden dirs and global topics storage
+            if name.startswith(".") or name in ("hermes-context-isolation", "_topics"):
                 continue
             memory_path = os.path.join(path, "MEMORY.md")
             soul_path = os.path.join(path, "SOUL.md")
@@ -672,22 +676,22 @@ def _detect_files(text):
 
 def _build_boundary_reminder(project_key, topic_id=None, step_by_step=False):
     """Build boundary reminder text. Shared across all chat modes.
-    For topics: lighter reminder (topic context, not full project boundary).
+    For topics: independent boundary (not tied to any project).
     For projects: full boundary with directory and scope restriction.
     step_by_step: if True, append V4 Pro anti-timeout instruction."""
     proj_name = pm.projects.get(project_key, {}).get("name", project_key)
     proj_dir = pm.projects.get(project_key, {}).get("workspace") or f"{PROJECTS_DIR}/{project_key}"
 
     if topic_id:
-        # Topics: lightweight — just identify the topic context
+        # Topics: independent boundary — identify the topic context
         topic_name = "话题"
-        for t in pm.topics.get(project_key, []):
+        for t in pm.topics:
             if t.get("id") == topic_id:
                 topic_name = t.get("name", "话题")
                 break
         text = (
-            f"[系统指令] 你正在「{proj_name}」项目的「{topic_name}」话题窗口。"
-            f"当前对话属于该话题，请围绕该话题内容回复。\n\n"
+            f"[系统指令] 你正在独立的「{topic_name}」话题窗口。"
+            f"这是一个独立对话空间，不属于任何项目。请围绕该话题内容回复。\n\n"
         )
     else:
         # Projects: full boundary
@@ -772,48 +776,48 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def _handle_topics(self, data):
         """POST /api/topics — create/delete/update topics server-side.
-        Actions: create {name}, delete {id}, update {id, name}."""
+        Actions: create {name}, delete {id}, update {id, name}.
+        Topics are global (independent of projects)."""
         import time as _time
         action = data.get("action", "create")
-        proj = data.get("project", pm.current)
-
-        if proj not in pm.topics:
-            pm._load_topics(proj)
-        topics = pm.topics.setdefault(proj, [])
 
         if action == "create":
             name = data.get("name", "").strip()
             if not name or len(name) < 2 or len(name) > 20:
                 self._respond_json({"error": "invalid name"}, status=400); return
-            if any(t["name"] == name for t in topics):
+            if any(t["name"] == name for t in pm.topics):
                 self._respond_json({"error": "duplicate name"}, status=409); return
             tid = "t_" + str(int(_time.time() * 1000))
             topic = {"id": tid, "name": name, "createdAt": _time.strftime("%Y-%m-%dT%H:%M:%S")}
-            topics.append(topic)
-            pm._save_topics(proj)
-            self._respond_json({"topic": topic, "project": proj})
+            pm.topics.append(topic)
+            pm._save_topics()
+            self._respond_json({"topic": topic})
 
         elif action == "delete":
             tid = data.get("id", "")
             if not tid:
                 self._respond_json({"error": "missing id"}, status=400); return
-            before = len(topics)
-            pm.topics[proj] = [t for t in topics if t["id"] != tid]
-            if len(pm.topics[proj]) == before:
+            before = len(pm.topics)
+            pm.topics = [t for t in pm.topics if t["id"] != tid]
+            if len(pm.topics) == before:
                 self._respond_json({"error": "not found"}, status=404); return
-            pm._save_topics(proj)
-            self._respond_json({"deleted": tid, "project": proj})
+            pm._save_topics()
+            # Clean up session data for this topic
+            sk = f"topic-{tid}"
+            pm.sessions.pop(sk, None)
+            pm.session_files.pop(sk, None)
+            self._respond_json({"deleted": tid})
 
         elif action == "update":
             tid = data.get("id", "")
             name = data.get("name", "").strip()
             if not tid or not name:
                 self._respond_json({"error": "missing id or name"}, status=400); return
-            for t in topics:
+            for t in pm.topics:
                 if t["id"] == tid:
                     t["name"] = name
-                    pm._save_topics(proj)
-                    self._respond_json({"topic": t, "project": proj}); return
+                    pm._save_topics()
+                    self._respond_json({"topic": t}); return
             self._respond_json({"error": "not found"}, status=404)
 
         else:
@@ -925,10 +929,6 @@ class ChatHandler(BaseHTTPRequestHandler):
         with pm._lock:
             pm.projects.pop(key, None)
             pm.sessions.pop(key, None)
-            # Remove all topic sessions for this project
-            for sk in list(pm.sessions.keys()):
-                if sk.startswith(key + "|"):
-                    pm.sessions.pop(sk, None)
             pm.topics.pop(key, None)
             if pm.current == key:
                 pm.current = "main"
@@ -1238,13 +1238,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.end_headers(); self.wfile.write(resp.encode("utf-8"))
         elif path == "/api/topics":
             self.send_response(200); self._cors()
-            from urllib.parse import parse_qs as _pqs2
-            qs2 = _pqs2(urlparse(self.path).query)
-            proj = qs2.get("project", [pm.current])[0]
-            # Ensure loaded
-            if proj not in pm.topics:
-                pm._load_topics(proj)
-            resp = json.dumps({"topics": pm.topics.get(proj, []), "project": proj}, ensure_ascii=False)
+            resp = json.dumps({"topics": pm.topics}, ensure_ascii=False)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers(); self.wfile.write(resp.encode("utf-8"))
         elif path == "/api/memory":
