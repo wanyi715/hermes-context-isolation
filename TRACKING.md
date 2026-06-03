@@ -1,6 +1,6 @@
 # Hermes 项目上下文隔离 — 追踪文档
 
-> 创建于 2026-05-18 | 最后更新 2026-05-18
+> 创建于 2026-05-18 | 最后更新 2026-06-03
 
 ---
 
@@ -10,126 +10,116 @@
 
 **让 Hermes 支持「项目级上下文隔离」：每个项目拥有独立的聊天窗口、记忆、文档和技能，互不污染。**
 
-### 具体目标拆解
+### 目标达成情况
 
-| # | 目标 | 衡量标准 | 优先级 |
-|---|------|---------|--------|
-| G1 | 隔离记忆 | 切到 alpha，看不到 beta 记忆 | P0 |
-| G2 | 隔离技能 | 每个项目只加载自己的 skill | P0 |
-| G3 | Web 主页替代微信作为主交互界面 | 用户打开 http://&lt;server-ip&gt; 直接开始聊天 | P0 |
-| G4 | 主聊天窗口 + 自动分流 | 在主窗口聊到某个项目，自动创建/切换到该项目窗口，转移相关记录 | P1 |
-| G5 | 话题隔离（新增） | 多轮讨论自动生成话题，左侧下方显示，有独立上下文但不长期维护 | P1 |
-| G6 | 按项目/话题过滤搜索 | 搜索「示例关键词」只返回对应项目的会话 | P1 |
-| G7 | 快速创建项目 | 一条命令/一次交互创建空项目工作区 | P1 |
+| # | 目标 | 衡量标准 | 状态 |
+|---|------|---------|------|
+| G1 | 隔离记忆 | 切到 alpha，看不到 beta 记忆 | ✅ 已完成 |
+| G2 | 隔离技能 | 每个项目只加载自己的 skill | ✅ 已完成 |
+| G3 | Web 主页替代微信作为主交互界面 | 用户打开 /chat/ 直接开始聊天 | ✅ 已完成 |
+| G4 | 主聊天窗口 + 项目窗口 | 主窗口/项目/话题三层独立 | ✅ 已完成 |
+| G5 | 话题隔离 | 多轮讨论自动生成话题，有独立上下文 | ✅ 已完成 |
+| G6 | 按项目/话题过滤搜索 | 搜索只返回对应项目的会话 | ✅ 已完成 |
+| G7 | 快速创建项目 | Web 端一键创建项目 | ✅ 已完成 |
 | G8 | 模型隔离（远期） | 不同项目用不同模型 | 🔮 远期 |
-
-### 非目标（明确不做）
-
-- ❌ 多用户协作（这是 HiClaw 的领域）
-- ❌ 容器/VM 级隔离（L4，太重）
-- ❌ 修改 Hermes 核心源码（阶段一不碰）
-- ❌ G7 模型隔离 — 当前不优先，阶段二再考虑
 
 ---
 
-## 二、解决方案
+## 二、架构
 
-### 整体思路
-
-借鉴 Context Isolation Levels 框架（L0+L2+L3），结合 HiClaw 的 SOUL.md+MEMORY.md+Skills.md 模式，在 Hermes 现有架构上做轻量封装。
-
-### 关键设计决策（2026-05-18 讨论新增）
-
-**1. Web 主页替代微信作为主交互界面**
-
-当前通过微信与 Hermes 沟通，但微信不适合多项目切换体验。改为：
-- 用户打开 http://&lt;server-ip&gt; 进入 Web 聊天界面
-- Web 端支持多标签/多面板（每个项目一个）
-- 微信保留用于通知和简单指令
-
-**2. 主聊天窗口 + 自动分流（Conversation Forking）**
-
-核心机制：用户在一个「主窗口」自由沟通。当对话内容触及某个已有项目，或触发创建新项目的条件时，系统自动将相关对话记录「分叉」到对应的项目窗口。
+### 三层独立架构（2026-05-31 完成）
 
 ```
-主窗口（默认）
-  │
-  ├─ "alpha 项目那个bug..."  →  自动检测到 alpha 项目
-  │                            → 分叉：创建/切换到 alpha 窗口
-  │                            → 相关消息转移到该窗口
-  │
-  ├─ "beta 项目数据..."    →  自动检测到 beta 项目
-  │                            → 分叉到 beta 窗口
-  │
-  └─ "新想法：做个..."     →  检测到新主题
-                               → 提示：是否创建新项目？
-                               → 确认后自动创建 + 转移记录
+Web Chat
+├── 主窗口 (main)        — 默认入口，全局记忆
+├── 项目窗口 (project)   — 独立 SOUL/MEMORY/workspace
+└── 话题窗口 (topic)     — 临时讨论，独立上下文
 ```
 
-这比手动切换更自然——用户不用记住「现在在哪个项目」，系统根据内容自动路由。
+三层平级独立，话题不归属项目。Session key 格式：
+- 主窗口: `main`
+- 项目: `{project_key}`
+- 话题: `topic-{topic_id}`
 
-### 方案概述
+### 目录结构
 
 ```
 ~/.hermes/projects/
+├── main/
+│   ├── SOUL.md           # 主窗口 persona
+│   └── MEMORY.md         # 全局记忆
 ├── alpha/
-│   ├── SOUL.md          # 项目专属 system prompt
-│   ├── MEMORY.md        # 项目专属记忆
-│   ├── skills/          # 项目专属技能
-│   └── workspace → /path/to/code  # 软链接到实际代码
-├── beta/
-├── gamma/
-├── delta/
-└── epsilon/
+│   ├── SOUL.md           # 项目 persona
+│   ├── MEMORY.md         # 项目记忆
+│   └── workspace → /path # 软链接到实际代码
+└── _topics/
+    ├── topics.json                    # 话题列表
+    ├── topic-{id}_chat.json           # 话题消息
+    ├── topic-{id}_files.json          # 话题关联文件（持久化）
+    └── topic-{id}_archive/            # 话题归档
 ```
-
-切换项目时：
-1. 将项目 MEMORY.md 设为当前活跃记忆
-2. 将项目 skills/ 加入 skill 发现路径
-3. 项目级 config（model override）合并到主配置
-4. 重置会话，注入项目 SOUL.md
-
-### 分阶段路线
-
-| 阶段 | 内容 | 状态 |
-|------|------|------|
-| Demo | 可视化概念验证 UI | ✅ 已完成 |
-| 阶段一 | 文件级项目隔离（脚本+配置，零核心改动） | ⏳ 待开始 |
-| 阶段二 | Hermes 插件化（原生斜杠命令、session 标记） | 🔮 远期 |
 
 ---
 
-## 三、当前进展
+## 三、已完成功能
 
-### 已完成
+### 核心功能
 
-- [x] 发现并研究 Context Isolation Levels 论文（2026-05-10, HoYu Fu）
-- [x] 研究 HiClaw 架构（阿里 AgentScope, Manager-Workers 模型）
-- [x] 编写实施方案：`~/.hermes/plans/project-context-isolation.md`
-- [x] 记录日记：`~/.hermes/journal/2026-05-18-项目上下文隔离.md`
-- [x] Web Demo 上线：http://&lt;server-ip&gt;/projects/ai-agent-context-demo/
-- [x] 主页添加入口卡片
-- [x] 工作流优化：「先搜再做」写入记忆
+- [x] 文件级项目隔离（SOUL.md + MEMORY.md）
+- [x] API 层 system_message 注入（不泄露其他项目内容）
+- [x] 三层架构：主窗口 / 项目 / 话题
+- [x] 话题自动创建 + 独立上下文
+- [x] 白盒记忆 CRUD（查看/添加/编辑/删除/置顶）
+- [x] 关联文件面板（右侧栏，含下载按钮）
+- [x] 会话持久化（chat_history.json + archive）
+- [x] session_files 持久化（重启不丢文件关联）
+- [x] 文件下载支持中文文件名（RFC 5987 编码）
+- [x] Vision 支持（HEIF→JPEG 转换 + mimo-v2.5 图片描述）
+- [x] SSE 流式响应
+- [x] 消息搜索（会话 + 记忆全文检索）
+- [x] 项目创建/删除/切换
+- [x] 双入口：Web Chat + 微信（iLink Bot）
 
-### 待讨论
+### 运维相关
 
-- [ ] 目标确认（当前讨论中）
-- [ ] Web 聊天界面的实现方式（嵌入主页 vs 独立页面）
-- [ ] 「自动分流」的触发规则：关键词匹配？还是 LLM 判断？
-- [ ] 主窗口 vs 项目窗口的视觉区分
-- [ ] 阶段一优先做哪些项目（建议先 alpha+beta 验证）
+- [x] API key 从 .env 加载（不硬编码）
+- [x] nginx 反向代理配置
+- [x] bridge 进程管理（systemd user service）
+- [x] session archive 防膨胀（定期清理）
 
-### 讨论中产生的新问题
+---
 
-1. **Web 聊天界面** — ✅ 已定：在主页增加聊天卡片，先做主聊天窗口，再扩展项目窗口
-2. **自动分流触发** — ✅ 已定：LLM 判断 + 用户确认反馈
-3. **消息转移** — ✅ 已定：先复制（Copy），安全优先；以后可改为移动
+## 四、已知陷阱
 
-### 下一步
+详见 `docs/` 目录下的 ADR 和组件文档。关键陷阱：
 
-- [ ] 创建 Web 主聊天界面 `/chat/`
-- [ ] 主页增加 💬 聊天入口卡片
-- [ ] 后续：加入 LLM 自动分流 + 用户确认机制
+1. 切换项目时必须重置 `currentTopicId = null`
+2. `exitTopic()` 的 header 不能写死"主窗口"，要动态读当前项目
+3. `_load_projects` 需跳过 `_topics` 目录
+4. session_files 存盘使用 `.tmp` + `os.rename` 保证原子性
+5. 中文文件名下载需 RFC 5987 编码（Python http.server latin-1 限制）
+6. 向 /var/www/html/ 写文件后必须 `chown -R admin:admin`
+
+---
+
+## 五、技术选型
+
+| 组件 | 选型 | 理由 |
+|------|------|------|
+| HTTP Server | Python http.server (stdlib) | 零依赖，1.6GB RAM 环境友好 |
+| 前端 | 原生 HTML/JS/CSS | 无构建步骤，单文件部署 |
+| 持久化 | JSON 文件 | 简单可靠，无数据库依赖 |
+| LLM API | MiMo (mimo-v2.5-pro) | 低延迟，中文优化 |
+| Vision | MiMo (mimo-v2.5) | 支持图片输入 |
+| 反向代理 | nginx | 成熟稳定 |
+
+---
+
+## 六、参考
+
+- [Context Isolation Levels](https://arxiv.org/abs/2504.19954) — HoYu Fu, 2026-05-10
+- [OpenBMB/PilotDeck](https://github.com/OpenBMB/PilotDeck) — 白盒记忆设计灵感
+- [ADR-001: Three-Layer Isolation](docs/adr/001-three-layer-isolation.md)
 
 ---
 

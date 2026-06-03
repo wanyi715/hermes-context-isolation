@@ -30,6 +30,7 @@ GLOBAL_MEMORY = os.path.expanduser("~/.hermes/memories/MEMORY.md")
 GLOBAL_SKILLS = os.path.expanduser("~/.hermes/skills")
 
 MODEL = os.environ.get("HERMES_MODEL", "mimo-v2.5")
+VISION_MODEL = os.environ.get("HERMES_VISION_MODEL", "mimo-v2.5")  # mimo-v2.5-pro doesn't support vision
 PROVIDER = "custom"
 BASE_URL = os.environ.get("HERMES_BASE_URL", "https://api.xiaomimimo.com/v1")
 API_KEY = os.environ["MIMO_API_KEY"]  # required, set in .env
@@ -76,6 +77,9 @@ class ProjectManager:
     # ── Topic persistence (global, independent of projects) ──
     def _topics_path(self):
         return os.path.join(self.TOPICS_DIR, "topics.json")
+
+    def _files_path(self, key):
+        return os.path.join(self._project_dir(key), f"{key}_files.json")
 
     def _load_topics(self):
         tp = self._topics_path()
@@ -164,6 +168,35 @@ class ProjectManager:
         except Exception as e:
             print(f"[bridge] _load_session({key}) error: {e}", flush=True)
         return []
+
+    def _save_session_files(self, key):
+        """Persist session_files to disk so they survive restarts."""
+        try:
+            fp = self._files_path(key)
+            tmp = fp + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.session_files.get(key, []), f, ensure_ascii=False)
+            os.rename(tmp, fp)
+        except Exception as e:
+            print(f"[bridge] _save_session_files({key}) error: {e}", flush=True)
+
+    def _load_session_files(self, key):
+        """Restore session_files from disk."""
+        try:
+            fp = self._files_path(key)
+            if os.path.exists(fp):
+                with open(fp) as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self.session_files[key] = data
+        except Exception as e:
+            print(f"[bridge] _load_session_files({key}) error: {e}", flush=True)
+
+    def _get_session_files(self, key):
+        """Get session_files with lazy disk load."""
+        if key not in self.session_files:
+            self._load_session_files(key)
+        return self.session_files.get(key, [])
 
     def _load_projects(self):
         """Scan ~/.hermes/projects/ for project directories."""
@@ -513,7 +546,7 @@ class ProjectManager:
                 "project": key,
                 "name": f"话题 ({topic_id[:8]}…)",
                 "memory_items": [],
-                "files": self.session_files.get(sk, []),
+                "files": self._get_session_files(sk),
                 "skills": [],
                 "memory_count": 0,
             }
@@ -533,7 +566,7 @@ class ProjectManager:
         # Append session-generated files (deduplicate by name)
         sk = self._session_key(key, None)
         existing_names = {f["name"] for f in files}
-        for sf in self.session_files.get(sk, []):
+        for sf in self._get_session_files(sk):
             if sf["name"] not in existing_names:
                 files.append(sf)
         # Scan skills
@@ -611,6 +644,90 @@ class ProjectManager:
 
 
 pm = ProjectManager()
+
+
+def _has_images(message):
+    """Check if a multimodal message contains image_url parts."""
+    if isinstance(message, list):
+        return any(isinstance(p, dict) and p.get("type") == "image_url" for p in message)
+    return False
+
+
+def _convert_heif_to_jpeg(data_url):
+    """Convert HEIF/HEIC data URLs to JPEG. Returns original URL if not HEIF."""
+    if not data_url.startswith("data:image/he"):
+        return data_url
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+        import base64, io
+        from PIL import Image
+        # Extract base64 data
+        header, b64data = data_url.split(",", 1)
+        img_bytes = base64.b64decode(b64data)
+        img = Image.open(io.BytesIO(img_bytes))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        jpeg_b64 = base64.b64encode(buf.getvalue()).decode()
+        print(f"[bridge] Converted HEIF→JPEG ({len(img_bytes)}→{len(buf.getvalue())} bytes)")
+        return f"data:image/jpeg;base64,{jpeg_b64}"
+    except Exception as e:
+        print(f"[bridge] HEIF conversion failed: {e}")
+        return data_url
+
+
+def _describe_images_with_vision(message):
+    """Use the vision model (mimo-v2.5) to describe images in a multimodal message.
+    Returns a text-only message with images replaced by descriptions.
+    This lets the main model (mimo-v2.5-pro, which lacks vision) still understand images."""
+    if not isinstance(message, list) or not _has_images(message):
+        return message
+
+    import requests as _req
+    descriptions = []
+    text_parts = []
+    for part in message:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            text_parts.append(part.get("text", ""))
+        elif part.get("type") == "image_url":
+            img_url = part.get("image_url", {}).get("url", "")
+            if not img_url:
+                continue
+            # Convert HEIF/HEIC to JPEG if needed (API doesn't support HEIF)
+            img_url = _convert_heif_to_jpeg(img_url)
+            try:
+                resp = _req.post(
+                    f"{BASE_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "model": VISION_MODEL,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "text", "text": "请详细描述这张图片的内容，包括所有文字、数字、图表、界面元素。用中文回答。"},
+                            {"type": "image_url", "image_url": {"url": img_url}}
+                        ]}],
+                        "max_tokens": 1000
+                    },
+                    timeout=60
+                )
+                if resp.status_code == 200:
+                    desc = resp.json()["choices"][0]["message"].get("content", "")
+                    descriptions.append(desc)
+                    print(f"[bridge] Vision described image: {desc[:60]}...")
+                else:
+                    err_body = resp.text[:200]
+                    descriptions.append(f"[图片识别失败: HTTP {resp.status_code}]")
+                    print(f"[bridge] Vision failed: {resp.status_code} — {err_body}")
+            except Exception as e:
+                descriptions.append(f"[图片识别异常: {e}]")
+                print(f"[bridge] Vision error: {e}")
+
+    # Build text-only message
+    combined = "\n".join(text_parts)
+    if descriptions:
+        combined += "\n\n【图片内容描述】\n" + "\n".join(descriptions)
+    return combined
 
 
 def _build_user_message(data):
@@ -806,6 +923,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             sk = f"topic-{tid}"
             pm.sessions.pop(sk, None)
             pm.session_files.pop(sk, None)
+            # Clean up persisted session files
+            fp = pm._files_path(sk)
+            if os.path.exists(fp):
+                os.remove(fp)
             self._respond_json({"deleted": tid})
 
         elif action == "update":
@@ -992,6 +1113,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             if not is_main or data.get("topic_id"):
                 boundary = _build_boundary_reminder(project_key, topic_id=data.get("topic_id"))
                 message = _prepend_boundary(message, boundary)
+            # When images present and main model lacks vision, describe images first via vision model
+            if _has_images(message):
+                message = _describe_images_with_vision(message)
+
             result = agent.run_conversation(
                 user_message=message,
                 system_message=None,  # ephemeral_system_prompt already has boundary+SOUL+MEMORY
@@ -1013,6 +1138,8 @@ class ChatHandler(BaseHTTPRequestHandler):
         files = _detect_files(response)
         sk = pm._session_key(project_key, data.get("topic_id"))
         pm.session_files.setdefault(sk, []).extend(files)
+        if files:
+            pm._save_session_files(sk)
         self.wfile.write(json.dumps({"response": response, "files": files, "project": project_key}, ensure_ascii=False).encode("utf-8"))
 
     def _handle_chat_polling(self, data):
@@ -1059,6 +1186,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                     _msg = _prepend_boundary(_msg, boundary)
 
                 # Run with 900s timeout — V4 Pro reasoning can spike to 500s per call
+                # When images present, describe via vision model first
+                if _has_images(_msg):
+                    _msg = _describe_images_with_vision(_msg)
+
                 def do_call():
                     return agent.run_conversation(
                         user_message=_msg,
@@ -1079,6 +1210,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                         return
 
                 response = result.get("final_response", "")
+
                 pm.add_message("user", text_only or "🖼️ 图片", project_key, data.get("topic_id"))
                 pm.add_message("assistant", response, project_key, data.get("topic_id"))
                 with self._task_lock:
@@ -1088,6 +1220,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                     self.tasks[task_id]["files"] = detected
                     sk = pm._session_key(project_key, data.get("topic_id"))
                     pm.session_files.setdefault(sk, []).extend(detected)
+                    if detected:
+                        pm._save_session_files(sk)
             except Exception as e:
                 print(f"[bridge] Task {task_id} error: {e}")
                 with self._task_lock:
@@ -1148,6 +1282,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                     boundary = _build_boundary_reminder(project_key, topic_id=_tid)
                     _msg = _prepend_boundary(_msg, boundary)
 
+                # When images present, describe via vision model first
+                if _has_images(_msg):
+                    _msg = _describe_images_with_vision(_msg)
+
                 result = agent.run_conversation(
                     user_message=_msg,
                     system_message=None if not _is_main else pm.get_context_for_chat(project_key) or None,
@@ -1193,6 +1331,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             sk = pm._session_key(project_key, data.get("topic_id"))
             pm.session_files.setdefault(sk, []).extend(files)
             if files:
+                pm._save_session_files(sk)
                 sse_send(self, "files", {"files": files})
 
         # Send close event and terminate connection
@@ -1464,7 +1603,15 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", mime)
-            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            # RFC 5987: encode non-ASCII filenames (Chinese etc.) to avoid latin-1 crash
+            from urllib.parse import quote as _urlquote
+            try:
+                filename.encode('ascii')
+                cd = f'attachment; filename="{filename}"'
+            except UnicodeEncodeError:
+                safe_fallback = filename.encode('ascii', 'ignore').decode() or 'download'
+                cd = f'attachment; filename="{safe_fallback}"; filename*=UTF-8\'\'{_urlquote(filename, safe="")}'
+            self.send_header("Content-Disposition", cd)
             self.send_header("Content-Length", str(os.path.getsize(filepath)))
             self.end_headers()
             with open(filepath, "rb") as f:
