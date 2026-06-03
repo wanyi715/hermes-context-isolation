@@ -214,7 +214,7 @@ class ProjectManager:
             skills_path = os.path.join(path, "skills")
             workspace_path = os.path.join(path, "workspace")
 
-            # Extract Chinese display name from SOUL.md (e.g. "# SOUL — 半导体财报分析")
+            # Extract Chinese display name from SOUL.md (e.g. "# SOUL — Project Alpha")
             display_name = name.replace("-", " ").title()
             soul_content = self._read_file(soul_path)
             if soul_content:

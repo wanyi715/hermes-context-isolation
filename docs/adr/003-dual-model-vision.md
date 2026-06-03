@@ -35,7 +35,7 @@ This is a **describe-then-inject** pattern: the Vision model produces a text des
 
 **Positive:**
 - Same API key and base_url for both models
-- Vision model also supports audio transcription (used for podcast QC)
+- Vision model also supports audio transcription (useful for content production workflows)
 - Main model's reasoning quality unaffected
 - HEIF conversion handles iPhone photos seamlessly
 

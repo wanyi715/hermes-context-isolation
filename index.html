@@ -335,9 +335,9 @@
       <h2>👋 欢迎使用 Hermes Chat</h2>
       <p>这是你的主聊天窗口。在这里自由沟通，当话题触及某个项目时，Hermes 会自动识别并帮你分叉到对应的工作区。</p>
       <div class="hints">
-        <span>皇帝游戏有个bug</span>
-        <span>红鬃烈马第12章</span>
-        <span>早报今天有什么</span>
+        <span>项目A有个bug</span>
+        <span>帮我写项目文档</span>
+        <span>今天有什么进展</span>
       </div>
     </div>
   </div>
@@ -386,11 +386,9 @@
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script>
 const projects = {
-  emperor: {name:"皇帝模拟游戏",icon:"👑"},
-  redmane: {name:"红鬃烈马",icon:"🐎"},
-  earnings: {name:"半导体财报分析",icon:"📊"},
-  brief: {name:"AI早报",icon:"📰"},
-  podcast: {name:"播客制作",icon:"🎙"}
+  alpha: {name:"Project Alpha",icon:"🅰️"},
+  beta: {name:"Project Beta",icon:"🅱️"},
+  gamma: {name:"Project Gamma",icon:"🅲"}
 };
 // Dynamic projects loaded from backend
 let dynamicProjects = {};
@@ -402,22 +400,21 @@ let currentProjectKey = "main";
 
 // ── Dynamic project list rendering ──────────────────────────────
 const MAIN_ICON_MAP = {
-  "emperor-game": "👑", "redmane": "🐎", "earnings": "📊",
-  "morning-brief": "📰", "podcast": "🎙", "hermes-agent": "⚙",
+  "alpha": "🅰️", "beta": "🅱️", "gamma": "🅲",
+  "hermes-agent": "⚙",
   "tech-diary-dialog": "📝"
 };
 const MAIN_NAME_MAP = {
-  "emperor-game": "皇帝模拟游戏", "redmane": "红鬃烈马",
-  "earnings": "半导体财报分析", "morning-brief": "AI早报",
-  "podcast": "播客制作", "hermes-agent": "Hermes Agent",
+  "alpha": "Project Alpha", "beta": "Project Beta",
+  "gamma": "Project Gamma", "hermes-agent": "Hermes Agent",
   "tech-diary-dialog": "技术日记"
 };
 
 // ── Project list (dynamic from API) ─────────────────────────────
 let currentTopicId = null;  // active topic id, declared early for renderContext access
 const PROJECT_ICONS = {
-  "main":"💬","emperor-game":"👑","redmane":"🐎","earnings":"📊",
-  "morning-brief":"📰","podcast":"🎙","hermes-agent":"⚙"
+  "main":"💬","alpha":"🅰️","beta":"🅱️","gamma":"🅲",
+  "hermes-agent":"⚙"
 };
 
 async function renderProjects() {
@@ -587,11 +584,9 @@ async function sendMessage() {
 
 function detectProject(text) {
   const rules = [
-    {key:"emperor", kw:["皇帝","游戏","v0","bug","角色","大臣","版本","main.py","CHANGELOG","src/"]},
-    {key:"redmane", kw:["红鬃","烈马","薛平贵","宝钏","章节","大纲","人物","故事","写作","周守义"]},
-    {key:"earnings", kw:["财报","长电","澜起","长鑫","中芯","AMAT","海光","寒武纪","芯原","华虹","中微","半导体","营收","净利润","IPO","公众号"]},
-    {key:"brief", kw:["早报","新闻","RSS","早晨","日报","AI新闻","芯片新闻"]},
-    {key:"podcast", kw:["播客","口播","TTS","音频","ep","质检","wav","mp3"]}
+    {key:"alpha", kw:["项目A","alpha","任务","需求","bug","测试","部署"]},
+    {key:"beta", kw:["项目B","beta","文档","设计","方案","评审"]},
+    {key:"gamma", kw:["项目C","gamma","数据","分析","报告","图表"]}
   ];
   for (const r of rules) {
     if (r.kw.some(k => text.includes(k))) return {key: r.key, ...projects[r.key]};
@@ -605,7 +600,7 @@ function renderMessages() {
     body.innerHTML = `<div class="welcome">
       <h2>👋 对话已清空</h2>
       <p>继续在主窗口聊天，或提及具体项目来触发自动分流。</p>
-      <div class="hints"><span>皇帝游戏有个bug</span><span>红鬃烈马第12章</span><span>早报今天有什么</span></div>
+      <div class="hints"><span>项目A有个bug</span><span>帮我写项目文档</span><span>今天有什么进展</span></div>
     </div>`;
     hasWelcomed = true;
     return;
@@ -1269,7 +1264,7 @@ async function detectTopic() {
     const data = await resp.json();
     if (data.action === "switch") {
       const key = data.project_key;
-      const keyMap = {"emperor-game":"👑 皇帝模拟游戏","redmane":"🐎 红鬃烈马","earnings":"📊 半导体财报","morning-brief":"📰 AI早报","podcast":"🎙 播客制作","hermes-agent":"⚙ Hermes Agent"};
+      const keyMap = {"alpha":"🅰️ Project Alpha","beta":"🅱️ Project Beta","gamma":"🅲 Project Gamma"};
       const label = keyMap[key];
       if (label) {
         document.querySelectorAll(".project-item").forEach(el => {

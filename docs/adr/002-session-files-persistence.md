@@ -22,7 +22,7 @@ Persist `session_files` to disk as JSON files alongside existing session data:
 ~/.hermes/projects/_topics/topic-t_123_files.json
 
 # e.g. project files
-~/.hermes/projects/earnings/earnings_files.json
+~/.hermes/projects/alpha/alpha_files.json
 ```
 
 **Write strategy:** Atomic write (`.tmp` + `os.rename`) on every file detection event. Only writes when new files are detected (no empty writes).
