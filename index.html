@@ -1,0 +1,1368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hermes Chat</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0d1117; color: #c9d1d9;
+    position: fixed; top:0; left:0; right:0; bottom:0;
+    display: flex; overflow: hidden;
+  }
+
+  .sidebar {
+    width: 240px; min-width: 240px; background: #161b22; border-right: 1px solid #30363d;
+    display: flex; flex-direction: column;
+  }
+  .sidebar-header {
+    padding: 16px; border-bottom: 1px solid #21262d;
+  }
+  .sidebar-header h2 { font-size: 0.95em; color: #58a6ff; }
+  .sidebar-header p { font-size: 0.7em; color: #484f58; margin-top: 2px; }
+  .project-list { flex:1; padding: 8px 0; overflow-y: auto; }
+  .project-item {
+    padding: 10px 16px; cursor: pointer; font-size: 0.82em; color: #8b949e;
+    display: flex; align-items: center; gap: 8px; border-left: 3px solid transparent;
+  }
+  .project-item:hover { background: #1c2128; color: #c9d1d9; }
+  .project-item.active { background: #1c2541; border-left-color: #58a6ff; color: #58a6ff; }
+  .project-item .icon { font-size: 1.1em; }
+  .sidebar-footer { padding: 12px 16px; border-top: 1px solid #21262d; }
+  .sidebar-footer .hint { font-size: 0.68em; color: #484f58; line-height: 1.5; }
+  .section-label {
+    font-size: 0.68em; color: #484f58; text-transform: uppercase;
+    letter-spacing: 0.06em; padding: 10px 16px 4px; font-weight: 700;
+  }
+  .topic-list { flex: 1; overflow-y: auto; padding: 4px 0; min-height: 60px; }
+  .topic-empty { font-size: 0.72em; color: #30363d; padding: 8px 16px; font-style: italic; }
+  .topic-item {
+    padding: 8px 16px; cursor: pointer; font-size: 0.78em; color: #8b949e;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .topic-item:hover { background: #1c2128; color: #c9d1d9; }
+  .topic-item.active { background: #1c2541; color: #58a6ff; }
+
+  .main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .chat-header {
+    padding: 12px 20px; border-bottom: 1px solid #21262d;
+    display: flex; align-items: center; gap: 10px; background: #161b22;
+  }
+  .mobile-nav { display: none; }  /* hidden on desktop */
+  .chat-header .dot { width: 8px; height: 8px; border-radius: 50%; background: #3fb950; flex-shrink: 0; }
+  .chat-header h3 { font-size: 0.9em; font-weight: 600; }
+  .chat-header .sub { font-size: 0.7em; color: #8b949e; margin-left: auto; }
+  .chat-body { flex:1; overflow-y: auto; padding: 20px 24px; display:flex; flex-direction:column; gap:12px; }
+  .chat-body .welcome {
+    text-align: center; padding: 40px 20px; color: #8b949e;
+  }
+  .chat-body .welcome h2 { color: #58a6ff; font-size: 1.2em; margin-bottom: 8px; }
+  .chat-body .welcome p { font-size: 0.85em; line-height: 1.6; max-width: 440px; margin: 0 auto; }
+  .chat-body .welcome .hints { margin-top: 16px; font-size: 0.75em; color: #484f58; }
+  .chat-body .welcome .hints span { display: inline-block; margin: 4px 6px; padding: 4px 10px; background: #161b22; border: 1px solid #21262d; border-radius: 12px; }
+
+  /* Topic suggestion bar */
+  .topic-suggestion {
+    display: none; padding: 10px 20px; background: #1c2541; border-top: 1px solid #30363d;
+    font-size: 0.82em; color: #c9d1d9; line-height: 1.5;
+  }
+  .topic-suggestion a { text-decoration: none; margin-left: 8px; cursor: pointer; }
+  .topic-suggestion a:hover { text-decoration: underline; }
+
+  .msg { max-width: 78%; line-height: 1.55; font-size: 0.88em; animation: fadeIn 0.2s; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+  .msg.user { align-self: flex-end; background: #1c2541; border-radius: 16px 16px 4px 16px; padding: 10px 14px; }
+  .msg.assistant { align-self: flex-start; background: #161b22; border: 1px solid #30363d; border-radius: 16px 16px 16px 4px; padding: 10px 14px; }
+  .msg.assistant .label { font-size: 0.7em; color: #58a6ff; margin-bottom: 4px; font-weight: 600; }
+  /* Markdown rendered content */
+  .msg.assistant .md h1,.msg.assistant .md h2,.msg.assistant .md h3 { margin: 12px 0 6px; color: #e6edf3; font-weight: 600; }
+  .msg.assistant .md h2 { font-size: 1.05em; border-bottom: 1px solid #30363d; padding-bottom: 4px; }
+  .msg.assistant .md h3 { font-size: 0.95em; }
+  .msg.assistant .md p { margin: 4px 0; line-height: 1.6; }
+  .msg.assistant .md ul,.msg.assistant .md ol { margin: 4px 0; padding-left: 20px; }
+  .msg.assistant .md li { margin: 2px 0; line-height: 1.5; }
+  .msg.assistant .md strong { color: #e6edf3; font-weight: 600; }
+  .msg.assistant .md code { background: #0d1117; padding: 1px 5px; border-radius: 4px; font-size: 0.85em; color: #ff7b72; }
+  .msg.assistant .md pre { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; overflow-x: auto; margin: 8px 0; }
+  .msg.assistant .md pre code { background: none; padding: 0; color: #c9d1d9; }
+  .msg.assistant .md table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 0.85em; }
+  .msg.assistant .md th { background: #1c2541; color: #58a6ff; padding: 6px 10px; border: 1px solid #30363d; text-align: left; }
+  .msg.assistant .md td { padding: 6px 10px; border: 1px solid #30363d; }
+  .msg.assistant .md blockquote { border-left: 3px solid #58a6ff; margin: 6px 0; padding: 4px 12px; color: #8b949e; }
+  .msg.assistant .md hr { border: none; border-top: 1px solid #30363d; margin: 12px 0; }
+  .msg.assistant .md a { color: #58a6ff; }
+
+  .chat-input-area {
+    padding: 12px 20px; border-top: 1px solid #21262d; display: flex; gap: 8px; background: #161b22;
+  }
+  .chat-input-area input {
+    flex:1; background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+    padding: 10px 14px; color: #c9d1d9; font-size: 0.85em; outline: none;
+  }
+  .chat-input-area input:focus { border-color: #58a6ff; }
+  .chat-input-area button {
+    background: #238636; color: #fff; border: none; border-radius: 8px;
+    padding: 10px 18px; cursor: pointer; font-size: 0.85em; white-space: nowrap;
+  }
+  .chat-input-area button:hover { background: #2ea043; }
+  .chat-input-area .img-btn {
+    background: #21262d; color: #8b949e; font-size: 1.2em; padding: 6px 12px;
+  }
+  .chat-input-area .img-btn:hover { background: #30363d; color: #58a6ff; }
+  .img-preview { padding: 0 20px 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .img-preview .thumb { position: relative; width: 64px; height: 64px; border-radius: 6px; overflow: hidden; border: 1px solid #30363d; }
+  .img-preview .thumb img { width:100%; height:100%; object-fit:cover; }
+  .img-preview .thumb .del { position:absolute; top:0; right:0; background:rgba(0,0,0,0.7); color:#f85149; cursor:pointer; padding:1px 5px; font-size:12px; }
+
+  /* === HISTORY PANEL === */
+  .history-panel { width: 320px; min-width: 320px; background: #161b22; overflow-y: auto; display: flex; flex-direction: column; border-left: 1px solid #30363d; }
+  .history-panel.hidden { display: none; }
+  .history-panel .inner { padding: 16px; }
+  .history-panel h3 { font-size: 0.9em; color: #58a6ff; margin: 0 0 12px; display: flex; justify-content: space-between; align-items: center; }
+  .history-panel h3 button { background: none; border: 1px solid #30363d; color: #8b949e; border-radius: 4px; cursor: pointer; padding: 2px 8px; font-size: 0.8em; }
+  .history-item { padding: 8px 0; border-bottom: 1px solid #21262d; cursor: pointer; }
+  .history-item:hover { background: #1c2128; margin: 0 -8px; padding: 8px; }
+  .history-item .h-date { font-size: 0.7em; color: #484f58; }
+  .history-item .h-platform { font-size: 0.7em; color: #58a6ff; }
+  .history-item .h-preview { font-size: 0.8em; color: #8b949e; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .section-label.hist { justify-content: space-between; }
+  .section-label.hist button { background: none; border: 1px solid #30363d; color: #8b949e; border-radius: 4px; cursor: pointer; padding: 1px 8px; font-size: 0.75em; }
+
+  /* Image in messages */
+  .msg.user img.msg-img { max-width: 200px; max-height: 200px; border-radius: 8px; margin-top: 4px; display: block; }
+  .file-downloads { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .dl-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
+    background: #1e3a5f; color: #7ec8f8; border-radius: 8px; text-decoration: none;
+    font-size: 13px; transition: background 0.2s; }
+  .dl-btn:hover { background: #2a5090; }
+  .dl-icon { font-size: 11px; opacity: 0.7; }
+
+  /* === RIGHT CONTEXT PANEL (collapsible) === */
+  .context-panel {
+    width: 280px; min-width: 280px; background: #161b22; overflow-y: auto;
+    display: flex; flex-direction: column; border-left: 1px solid #30363d;
+  }
+  .context-panel.hidden { display: none; }
+  .context-toggle {
+    position: fixed; right: 0; top: 50%; transform: translateY(-50%);
+    width: 20px; height: 48px; background: #161b22; border: 1px solid #30363d;
+    border-right: none; border-radius: 6px 0 0 6px; cursor: pointer;
+    color: #8b949e; font-size: 0.7em; display: flex; align-items: center;
+    justify-content: center; z-index: 10;
+  }
+  .context-toggle:hover { background: #21262d; color: #58a6ff; }
+  .context-panel .inner { padding: 16px 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+  .context-stats {
+    display: flex; gap: 12px; font-size: 0.75em; padding-bottom: 8px;
+    border-bottom: 1px solid #21262d;
+  }
+  .context-stats span { color: #8b949e; }
+  .context-stats strong { color: #c9d1d9; }
+  .context-section { }
+  .context-section-header {
+    display: flex; align-items: center; gap: 6px; cursor: pointer;
+    padding: 6px 0; user-select: none;
+  }
+  .context-section-header:hover .section-title { color: #c9d1d9; }
+  .section-arrow {
+    font-size: 0.6em; color: #484f58; transition: transform 0.15s;
+    display: inline-block; width: 12px;
+  }
+  .section-arrow.open { transform: rotate(90deg); }
+  .section-title { font-size: 0.72em; color: #8b949e; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700; }
+  .section-count { font-size: 0.65em; color: #30363d; }
+  .context-items { display: flex; flex-direction: column; gap: 3px; overflow: hidden; }
+  .context-items.collapsed { display: none; }
+  .context-item {
+    padding: 7px 10px; border-radius: 6px; background: #0d1117;
+    border: 1px solid #21262d; font-size: 0.75em; line-height: 1.4;
+  }
+  .context-item .tag {
+    display: inline-block; font-size: 0.68em; padding: 1px 6px; border-radius: 4px;
+    margin-right: 5px; font-weight: 600; vertical-align: middle;
+  }
+  .tag-memory { background: #1c2541; color: #58a6ff; }
+  .tag-file { background: #1a2332; color: #3fb950; }
+  .tag-skill { background: #2d1a3e; color: #bc8cff; }
+  .context-item .size { font-size: 0.7em; color: #484f58; margin-left: 4px; }
+  .context-empty { font-size: 0.72em; color: #30363d; padding: 4px 10px; font-style: italic; }
+
+  /* Memory CRUD (white-box memory v1) */
+  .mem-item { position: relative; }
+  .mem-item .mem-actions {
+    display: none; position: absolute; top: 3px; right: 4px; gap: 2px;
+  }
+  .mem-item:hover .mem-actions { display: flex; }
+  .mem-item .mem-btn {
+    background: none; border: 1px solid #30363d; color: #8b949e;
+    cursor: pointer; font-size: 11px; padding: 0 4px; border-radius: 3px; line-height: 1.4;
+  }
+  .mem-item .mem-btn:hover { background: #21262d; color: #c9d1d9; }
+  .mem-item .mem-btn.del:hover { background: #3d1f1f; color: #f85149; border-color: #f85149; }
+  .mem-item .mem-source {
+    font-size: 0.65em; color: #484f58; margin-top: 3px; display: block;
+  }
+  .mem-item .mem-edit-textarea {
+    width: 100%; min-height: 50px; background: #0d1117; color: #c9d1d9;
+    border: 1px solid #58a6ff; border-radius: 4px; padding: 6px 8px;
+    font-size: 0.75em; font-family: inherit; resize: vertical;
+  }
+  .mem-item .mem-edit-actions { display: flex; gap: 4px; margin-top: 4px; }
+  .mem-item .mem-edit-actions button {
+    background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+    cursor: pointer; font-size: 0.7em; padding: 2px 8px; border-radius: 3px;
+  }
+  .mem-item .mem-edit-actions button.save { background: #238636; border-color: #238636; }
+  .mem-item .mem-edit-actions button.save:hover { background: #2ea043; }
+  .mem-add-btn {
+    width: 100%; background: none; border: 1px dashed #30363d; color: #484f58;
+    cursor: pointer; font-size: 0.7em; padding: 6px; border-radius: 6px; margin-top: 4px;
+  }
+  .mem-add-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+  .mem-pinned { border-color: #bc8cff !important; }
+
+  /* Search box in context panel */
+  .search-box {
+    display: flex; gap: 6px; padding-bottom: 10px;
+    border-bottom: 1px solid #21262d; margin-bottom: 2px;
+  }
+  .search-box input {
+    flex: 1; background: #0d1117; border: 1px solid #30363d;
+    border-radius: 6px; padding: 6px 10px; color: #c9d1d9;
+    font-size: 0.78em; outline: none;
+  }
+  .search-box input:focus { border-color: #58a6ff; }
+  .search-box button {
+    background: #21262d; border: 1px solid #30363d; border-radius: 6px;
+    color: #8b949e; cursor: pointer; padding: 4px 10px; font-size: 0.85em;
+  }
+  .search-box button:hover { background: #30363d; color: #58a6ff; }
+  .search-results { margin-top: 8px; }
+  .search-result {
+    padding: 8px 10px; margin-bottom: 6px; border-radius: 6px;
+    background: #0d1117; border: 1px solid #21262d;
+    font-size: 0.75em; line-height: 1.4; cursor: pointer;
+  }
+  .search-result:hover { border-color: #58a6ff; }
+  .search-result .sr-role {
+    font-size: 0.7em; color: #58a6ff; margin-bottom: 3px; font-weight: 600;
+  }
+  .search-result .sr-role.user { color: #3fb950; }
+  .search-result .sr-text { color: #c9d1d9; }
+  .search-result .sr-context { font-size: 0.85em; color: #484f58; margin-top: 2px; font-style: italic; }
+  .search-empty { font-size: 0.72em; color: #30363d; padding: 8px 10px; font-style: italic; }
+
+  /* Delete button on project items */
+  .delete-btn {
+    margin-left: auto; font-size: 0.85em; color: #484f58;
+    cursor: pointer; padding: 2px 6px; border-radius: 4px;
+    opacity: 0; transition: opacity 0.15s;
+  }
+  .project-item:hover .delete-btn { opacity: 1; }
+  .delete-btn:hover { background: #3d1f1f; color: #f85149; }
+
+  @media (max-width: 700px) {
+    body { flex-direction: column; }
+    .sidebar {
+      position: fixed; left: 0; top: 0; bottom: 0; z-index: 20;
+      transform: translateX(-100%); transition: transform 0.2s;
+    }
+    .sidebar.open { transform: translateX(0); }
+    .context-panel {
+      position: fixed; right: 0; top: 0; bottom: 0; z-index: 20;
+      transform: translateX(100%); transition: transform 0.2s;
+    }
+    .context-panel.open { transform: translateX(0); }
+    .context-toggle { display: flex; }
+    .msg { max-width: 90%; }
+    /* Hamburger & panel buttons */
+    .mobile-nav {
+      display: flex; padding: 8px 12px; background: #161b22;
+      border-bottom: 1px solid #21262d; gap: 8px; align-items: center;
+    }
+    .mobile-nav .hamburger {
+      background: none; border: none; color: #8b949e; font-size: 1.2em;
+      cursor: pointer; padding: 4px;
+    }
+    .mobile-nav .brand { font-size: 0.9em; color: #58a6ff; font-weight: 600; flex: 1; }
+    .overlay { display: none; }
+    .overlay.show {
+      display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+      z-index: 15;
+    }
+  }
+</style>
+</head>
+<body>
+
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h2>🧠 Hermes</h2>
+      <p>项目上下文隔离 · 主窗口</p>
+    </div>
+    <div class="section-label">📁 项目</div>
+    <div class="project-list" id="projectList">
+      <div class="project-item active" data-key="main"><span class="icon">💬</span> 主窗口</div>
+    </div>
+    <div class="section-label">💬 话题 <span style="float:right;cursor:pointer;color:#58a6ff;font-size:0.8em" onclick="promptNewTopic()">＋</span></div>
+  <div class="topic-list" id="topicList">
+    <div class="topic-empty">暂无话题。多轮讨论后自动生成。</div>
+  </div>
+  <div class="sidebar-footer">
+    <div class="hint">
+      💡 选择左侧项目切换上下文。不同项目聊天记录独立存储，互不干扰。
+    </div>
+  </div>
+</aside>
+
+<main class="main">
+  <!-- Mobile nav -->
+  <div class="mobile-nav">
+    <button class="hamburger" onclick="openSidebar()" title="项目/话题">☰</button>
+    <span class="brand">Hermes</span>
+    <button class="hamburger" onclick="openContext()" title="上下文">📋</button>
+  </div>
+  <div class="chat-header">
+    <span class="dot"></span>
+    <h3>💬 主窗口</h3>
+    <span class="sub">自动分流待命</span>
+  </div>
+
+  <div class="chat-body" id="chatBody">
+    <div class="welcome">
+      <h2>👋 欢迎使用 Hermes Chat</h2>
+      <p>这是你的主聊天窗口。在这里自由沟通，当话题触及某个项目时，Hermes 会自动识别并帮你分叉到对应的工作区。</p>
+      <div class="hints">
+        <span>皇帝游戏有个bug</span>
+        <span>红鬃烈马第12章</span>
+        <span>早报今天有什么</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="topic-suggestion" id="topicSuggestion"></div>
+  <div class="chat-input-area">
+    <button class="img-btn" onclick="document.getElementById('imgInput').click()" title="发送图片">📷</button>
+    <input type="file" id="imgInput" accept="image/*" style="display:none" onchange="handleImagePicked(event)">
+    <input type="text" id="chatInput" placeholder="输入消息…  /new 清空对话" onkeydown="if(event.key==='Enter')sendMessage()">
+    <button onclick="toggleHistory()" title="聊天历史" style="background:none;border:1px solid #30363d;color:#8b949e;cursor:pointer;padding:6px 10px;border-radius:6px;font-size:0.9em">📋</button>
+    <button onclick="sendMessage()">发送</button>
+  </div>
+  <div class="img-preview" id="imgPreview"></div>
+</main>
+
+<!-- RIGHT: History Panel -->
+<aside class="history-panel hidden" id="historyPanel">
+  <div class="inner">
+    <h3>📋 聊天历史 <button onclick="toggleHistory()">✕</button></h3>
+    <div style="font-size:0.75em;color:#484f58;margin-bottom:8px">最近20条跨平台对话记录</div>
+    <div id="historyList"><div style="color:#484f58;font-size:0.8em">加载中…</div></div>
+  </div>
+</aside>
+
+<!-- RIGHT: Context Panel toggle -->
+<div class="context-toggle" id="contextToggle" onclick="toggleContext()" title="显示/隐藏上下文">◀</div>
+
+<!-- RIGHT: Context Panel -->
+<aside class="context-panel hidden" id="contextPanel">
+  <div class="inner" id="contextInner">
+    <div class="search-box">
+      <input type="text" id="searchInput" placeholder="搜索对话…" onkeydown="if(event.key==='Enter')doSearch()">
+      <button onclick="doSearch()">🔍</button>
+    </div>
+    <div id="searchResults" style="display:none"></div>
+    <div class="context-stats" id="contextStats"></div>
+    <div class="context-section" id="memSection"></div>
+    <div class="context-section" id="fileSection"></div>
+    <div class="context-section" id="skillSection"></div>
+  </div>
+</aside>
+
+<!-- Overlay for mobile panels -->
+<div class="overlay" id="overlay" onclick="closePanels()"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+const projects = {
+  emperor: {name:"皇帝模拟游戏",icon:"👑"},
+  redmane: {name:"红鬃烈马",icon:"🐎"},
+  earnings: {name:"半导体财报分析",icon:"📊"},
+  brief: {name:"AI早报",icon:"📰"},
+  podcast: {name:"播客制作",icon:"🎙"}
+};
+// Dynamic projects loaded from backend
+let dynamicProjects = {};
+
+let messages = [];
+let hasWelcomed = true;
+let isLoading = false;
+let currentProjectKey = "main";
+
+// ── Dynamic project list rendering ──────────────────────────────
+const MAIN_ICON_MAP = {
+  "emperor-game": "👑", "redmane": "🐎", "earnings": "📊",
+  "morning-brief": "📰", "podcast": "🎙", "hermes-agent": "⚙",
+  "tech-diary-dialog": "📝"
+};
+const MAIN_NAME_MAP = {
+  "emperor-game": "皇帝模拟游戏", "redmane": "红鬃烈马",
+  "earnings": "半导体财报分析", "morning-brief": "AI早报",
+  "podcast": "播客制作", "hermes-agent": "Hermes Agent",
+  "tech-diary-dialog": "技术日记"
+};
+
+// ── Project list (dynamic from API) ─────────────────────────────
+let currentTopicId = null;  // active topic id, declared early for renderContext access
+const PROJECT_ICONS = {
+  "main":"💬","emperor-game":"👑","redmane":"🐎","earnings":"📊",
+  "morning-brief":"📰","podcast":"🎙","hermes-agent":"⚙"
+};
+
+async function renderProjects() {
+  try {
+    const resp = await fetch("/api/projects");
+    const data = await resp.json();
+    const list = document.getElementById("projectList");
+    let html = '<div class="project-item' + (currentProjectKey === "main" ? " active" : "") + '" data-key="main"><span class="icon">💬</span> 主窗口</div>';
+    for (const p of data.projects) {
+      if (p.key === "main") continue;  // already rendered above
+      const icon = PROJECT_ICONS[p.key] || "📁";
+      const active = currentProjectKey === p.key ? " active" : "";
+      html += `<div class="project-item${active}" data-key="${p.key}"><span class="icon">${icon}</span> ${p.name}<span class="delete-btn" data-key="${esc(p.key)}" data-name="${esc(p.name)}">🗑</span></div>`;
+    }
+    list.innerHTML = html;
+  } catch(e) { /* keep existing items */ }
+}
+
+// Event delegation — single click handler for all project items
+document.getElementById("projectList").addEventListener("click", async (e) => {
+  // Handle delete button
+  if (e.target.closest(".delete-btn")) {
+    const btn = e.target.closest(".delete-btn");
+    deleteProject(btn.dataset.key, btn.dataset.name);
+    return;
+  }
+  const el = e.target.closest(".project-item");
+  if (!el) return;
+  const key = el.dataset.key;
+  const icon = el.querySelector(".icon")?.textContent || "💬";
+  const text = el.textContent.trim();
+
+  document.querySelectorAll("#projectList .project-item").forEach(e => e.classList.remove("active"));
+  el.classList.add("active");
+  document.querySelector(".chat-header h3").textContent = icon + " " + text;
+  document.querySelector(".chat-header .sub").textContent = key === "main" ? "自动分流待命" : "切换中…";
+
+  saveMessages();
+  currentProjectKey = key;
+  currentTopicId = null;  // Reset topic when switching projects
+  messages = [];  // clear before loading new project
+
+  try {
+    const resp = await fetch("/api/switch-project", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({project: key})
+    });
+    const info = await resp.json();
+    document.querySelector(".chat-header .sub").textContent =
+      key === "main" ? "自动分流待命" : `已切换 · ${info.memory_count || 0}条记忆`;
+    // Always fetch from server and use THAT data (server is source of truth)
+    await loadMessages();
+    try {
+      const msgResp = await fetch("/api/messages?project=" + encodeURIComponent(key));
+      const msgData = await msgResp.json();
+      if (msgData.messages) {
+        messages = msgData.messages.map(m => ({role: m.role, text: m.content || m.text || ""}));
+        hasWelcomed = false;
+        saveMessages();
+      }
+    } catch(e2) { /* server unavailable */ }
+    if (messages.length === 0) { hasWelcomed = true; }
+    renderMessages();
+    renderContext();
+  } catch(e) {
+    document.querySelector(".chat-header .sub").textContent = "切换失败";
+  }
+});
+
+// Load project list on start
+renderProjects();
+
+// Restore chat on page load
+(async () => {
+  const restored = await loadMessages();
+  if (!restored) hasWelcomed = true;
+  renderMessages();
+})();
+fetch("/api/switch-project", {
+  method: "POST", headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({project: currentProjectKey})
+}).catch(() => {});
+
+async function sendMessage() {
+  const input = document.getElementById("chatInput");
+  const text = input.value.trim();
+  const hasImages = pendingImages.length > 0;
+  if ((!text && !hasImages) || isLoading) return;
+
+  if (text === "/new") { clearMessages(); input.value = ""; return; }
+
+  if (hasWelcomed) { hasWelcomed = false; }
+
+  // Attach images to message object
+  let msgImages = null;
+  if (hasImages) {
+    msgImages = pendingImages.map(function(img) { return img.dataUrl; });
+    pendingImages = [];
+    renderImagePreviews();
+  }
+  messages.push({role:"user", text: text || "🖼️ 图片", images: msgImages});
+  input.value = "";
+  renderMessages();
+
+  isLoading = true;
+  const sendBtn = document.querySelector(".chat-input-area button:last-child");
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.style.opacity = "0.5"; }
+  const thinkingIdx = messages.length;
+  messages.push({role:"assistant", text:"💭 正在思考..."});
+  renderMessages();
+
+  // Build request body
+  const reqBody = {message: text || "请看这张图片", mode: "poll", project: currentProjectKey};
+  if (currentTopicId) reqBody.topic_id = currentTopicId;
+  if (msgImages && msgImages.length > 0) {
+    reqBody.images = msgImages;
+  }
+
+  const ruled = detectProject(text);
+
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(reqBody)
+    });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const {task_id} = await resp.json();
+    if (!task_id) throw new Error("no task_id returned");
+
+    let elapsed = 0;
+    const MAX_POLL = 600; // 10 min timeout
+    while (elapsed < MAX_POLL) {
+      await new Promise(r => setTimeout(r, 1000));  // poll every 1s
+      elapsed += 1;
+      const dots = ".".repeat((Math.floor(elapsed % 4) + 1));
+      messages[thinkingIdx] = {role:"assistant", text: "💭 处理中" + dots + " (" + elapsed + "s)"};
+      updateMessageDOM(thinkingIdx);
+
+      const pollResp = await fetch("/api/task/" + task_id);
+      const task = await pollResp.json();
+
+      if (task.status === "done") {
+        messages[thinkingIdx] = {role:"assistant", text: task.response || "（无回复）", routing: ruled ? ruled.key : null, files: task.files || []};
+        saveMessages();
+        break;
+      } else if (task.status === "error") {
+        messages[thinkingIdx] = {role:"assistant", text: "抱歉，出错了：" + (task.error || "未知错误")};
+        saveMessages();
+        break;
+      }
+      // else: still processing, keep polling
+    }
+    if (elapsed >= MAX_POLL) {
+      messages[thinkingIdx] = {role:"assistant", text: "⏰ 请求超时（10分钟），请重试。"};
+    }
+    renderMessages();
+  } catch(e) {
+    messages[thinkingIdx] = {role:"assistant", text:"抱歉，请求失败：" + e.message};
+    saveMessages();
+    renderMessages();
+  }
+  isLoading = false;
+  if (sendBtn) { sendBtn.disabled = false; sendBtn.style.opacity = "1"; }
+  renderMessages();
+}
+
+function detectProject(text) {
+  const rules = [
+    {key:"emperor", kw:["皇帝","游戏","v0","bug","角色","大臣","版本","main.py","CHANGELOG","src/"]},
+    {key:"redmane", kw:["红鬃","烈马","薛平贵","宝钏","章节","大纲","人物","故事","写作","周守义"]},
+    {key:"earnings", kw:["财报","长电","澜起","长鑫","中芯","AMAT","海光","寒武纪","芯原","华虹","中微","半导体","营收","净利润","IPO","公众号"]},
+    {key:"brief", kw:["早报","新闻","RSS","早晨","日报","AI新闻","芯片新闻"]},
+    {key:"podcast", kw:["播客","口播","TTS","音频","ep","质检","wav","mp3"]}
+  ];
+  for (const r of rules) {
+    if (r.kw.some(k => text.includes(k))) return {key: r.key, ...projects[r.key]};
+  }
+  return null;
+}
+
+function renderMessages() {
+  const body = document.getElementById("chatBody");
+  if (messages.length === 0) {
+    body.innerHTML = `<div class="welcome">
+      <h2>👋 对话已清空</h2>
+      <p>继续在主窗口聊天，或提及具体项目来触发自动分流。</p>
+      <div class="hints"><span>皇帝游戏有个bug</span><span>红鬃烈马第12章</span><span>早报今天有什么</span></div>
+    </div>`;
+    hasWelcomed = true;
+    return;
+  }
+  body.innerHTML = messages.map((m, i) => {
+    const txt = m.text || m.content || "";
+    if (m.role === "user") {
+      let imgHtml = "";
+      if (m.images && m.images.length > 0) {
+        imgHtml = m.images.map(src => `<img class="msg-img" src="${src}">`).join('');
+      }
+      return `<div class="msg user" id="msg-${i}">${esc(txt)}${imgHtml}</div>`;
+    }
+    let label = "🜁 Hermes";
+    if (m.routing) label += ` · 检测到 ${projects[m.routing]?.icon||""} ${projects[m.routing]?.name||""}`;
+    const html = typeof marked !== "undefined" ? marked.parse(txt) : esc(txt).replace(/\\n/g,"<br>");
+    // Download buttons for detected files
+    let fileBtns = "";
+    if (m.files && m.files.length > 0) {
+      fileBtns = '<div class="file-downloads">' + m.files.map(f => {
+        const dlUrl = "/api/download?path=" + encodeURIComponent(f.path);
+        const icon = f.type === "image" ? "🖼" : "📄";
+        return '<a class="dl-btn" href="' + dlUrl + '" download="' + esc(f.name) + '">' + icon + ' ' + esc(f.name) + ' <span class="dl-icon">⬇</span></a>';
+      }).join("") + '</div>';
+    }
+    return `<div class="msg assistant" id="msg-${i}"><div class="label">${label}</div><div class="md">${html}</div>${fileBtns}</div>`;
+  }).join("");
+  body.scrollTop = body.scrollHeight;
+}
+
+// Update a single message in the DOM without full re-render (avoids flicker during streaming)
+function updateMessageDOM(idx) {
+  const el = document.getElementById("msg-" + idx);
+  if (!el) return;
+  const m = messages[idx];
+  if (!m) return;
+  if (m.role === "user") {
+    el.innerHTML = esc(m.text);
+  } else {
+    let label = "🜁 Hermes";
+    if (m.routing) label += ` · 检测到 ${projects[m.routing]?.icon||""} ${projects[m.routing]?.name||""}`;
+    el.innerHTML = `<div class="label">${label}</div>${esc(m.text).replace(/\n/g,"<br>")}`;
+  }
+}
+
+function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+// ── localStorage persistence (per-project) ──────────────────────
+const STORAGE_PREFIX = "hermes_chat_";
+
+function storageKey() { return STORAGE_PREFIX + currentProjectKey; }
+
+function saveMessages() {
+  try {
+    const toSave = messages.slice(-100);
+    localStorage.setItem(storageKey(), JSON.stringify(toSave));
+  } catch(e) { /* quota exceeded */ }
+}
+
+async function loadMessages() {
+  // 1. Fetch from server FIRST — server is the source of truth
+  try {
+    const resp = await fetch("/api/messages?project=" + encodeURIComponent(currentProjectKey));
+    const data = await resp.json();
+    if (data.messages && data.messages.length > 0) {
+      messages = data.messages.map(m => ({role: m.role, text: m.content || ""})).slice(-100);
+      hasWelcomed = false;
+      // Cache to localStorage
+      localStorage.setItem(storageKey(), JSON.stringify(messages));
+      return true;
+    }
+  } catch(e) { /* server unavailable */ }
+
+  // 2. Fallback: localStorage (offline / server down)
+  try {
+    const raw = localStorage.getItem(storageKey());
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        messages = parsed;
+        hasWelcomed = false;
+        return true;
+      }
+    }
+  } catch(e) { /* corrupted */ }
+
+  return false;
+}
+
+function clearMessages() {
+  messages = [];
+  hasWelcomed = true;
+  try { localStorage.removeItem(storageKey()); } catch(e) {}
+  renderMessages();
+}
+
+// ── Context Panel ──────────────────────────────────────────────
+let contextPanelVisible = false;
+let sectionState = { memory: true, files: true, skills: true };
+
+function toggleContext() {
+  const panel = document.getElementById("contextPanel");
+  const toggle = document.getElementById("contextToggle");
+  contextPanelVisible = !contextPanelVisible;
+  if (window.innerWidth <= 700) {
+    // Mobile: slide in/out
+    panel.classList.toggle("open", contextPanelVisible);
+    document.getElementById("overlay").classList.toggle("show", contextPanelVisible);
+    toggle.style.display = contextPanelVisible ? "none" : "flex";
+  } else {
+    panel.classList.toggle("hidden", !contextPanelVisible);
+    toggle.textContent = contextPanelVisible ? "▶" : "◀";
+  }
+}
+
+function toggleSection(key) {
+  sectionState[key] = !sectionState[key];
+  const items = document.getElementById(key + "Items");
+  const arrow = document.getElementById(key + "Arrow");
+  if (items) items.classList.toggle("collapsed", !sectionState[key]);
+  if (arrow) arrow.classList.toggle("open", sectionState[key]);
+}
+
+// Mobile panel controls
+function openSidebar() {
+  document.getElementById("contextPanel").classList.remove("open");
+  document.querySelector(".sidebar").classList.toggle("open");
+  document.getElementById("overlay").classList.toggle("show",
+    document.querySelector(".sidebar").classList.contains("open"));
+}
+function openContext() {
+  document.querySelector(".sidebar").classList.remove("open");
+  const panel = document.getElementById("contextPanel");
+  panel.classList.toggle("open");
+  contextPanelVisible = panel.classList.contains("open");
+  document.getElementById("overlay").classList.toggle("show", contextPanelVisible);
+}
+function closePanels() {
+  document.querySelector(".sidebar").classList.remove("open");
+  document.getElementById("contextPanel").classList.remove("open");
+  document.getElementById("overlay").classList.remove("show");
+  contextPanelVisible = false;
+}
+
+function fmtSize(bytes) {
+  if (!bytes || bytes === 0) return "";
+  if (bytes < 1024) return bytes + "B";
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + "KB";
+  return (bytes / 1048576).toFixed(1) + "MB";
+}
+
+async function renderContext() {
+  try {
+    let ctxUrl = "/api/context";
+    if (currentTopicId) ctxUrl += "?topic_id=" + encodeURIComponent(currentTopicId);
+    const resp = await fetch(ctxUrl);
+    const ctx = await resp.json();
+    const m = ctx.memory_items || [];
+    const f = ctx.files || [];
+    const s = ctx.skills || [];
+
+    // Stats row
+    document.getElementById("contextStats").innerHTML =
+      `<span>🧠 记忆 <strong>${m.length}</strong></span>` +
+      `<span>📄 文件 <strong>${f.length}</strong></span>` +
+      `<span>🛠 技能 <strong>${s.length}</strong></span>`;
+
+    // Memory section — white-box memory v1 with CRUD
+    // Inspired by OpenBMB/PilotDeck's white-box memory design
+    // @see https://github.com/OpenBMB/PilotDeck
+    document.getElementById("memSection").innerHTML =
+      '<div class="context-section-header" onclick="toggleSection(\'memory\')">' +
+      `<span class="section-arrow${sectionState.memory ? ' open' : ''}" id="memoryArrow">▶</span>` +
+      '<span class="section-title">🧠 项目记忆</span>' +
+      `<span class="section-count">${m.length}</span></div>` +
+      `<div class="context-items${sectionState.memory ? '' : ' collapsed'}" id="memoryItems">` +
+      (m.length === 0 ? '<div class="context-empty">暂无记忆</div>' :
+        m.map(item => renderMemoryItem(item)).join('')) +
+      `<button class="mem-add-btn" onclick="addMemory()">＋ 添加记忆</button>` +
+      '</div>';
+
+    // Files section
+    document.getElementById("fileSection").innerHTML = buildSection(
+      "files", "📄 关联文件", f, (item) => {
+        const icon = item.is_dir ? "📁" : "📄";
+        let dl = "";
+        if (!item.is_dir && item.path) {
+          dl = `<a class="dl-icon" href="/api/download?path=${encodeURIComponent(item.path)}" title="下载" onclick="event.stopPropagation()">⬇</a>`;
+        }
+        return `<span class="tag tag-file">${icon}</span>${esc(item.name)}` +
+          (item.size ? `<span class="size">${fmtSize(item.size)}</span>` : "") + dl;
+      }, f.length
+    );
+
+    // Skills section
+    document.getElementById("skillSection").innerHTML = buildSection(
+      "skills", "🛠 加载技能", s, (item) => {
+        const name = item.is_dir ? item.name.replace(/\/$/, "") : item.name;
+        return `<span class="tag tag-skill">⚙</span>${esc(name)}`;
+      }, s.length
+    );
+  } catch(e) {
+    document.getElementById("contextStats").innerHTML = "<span style='color:#f85149'>加载失败: " + e.message + "</span>";
+    console.error("renderContext error:", e);
+  }
+}
+
+function buildSection(key, title, items, itemFn, count) {
+  const open = sectionState[key];
+  const arrow = `<span class="section-arrow${open ? " open" : ""}" id="${key}Arrow">▶</span>`;
+  const header = `<div class="context-section-header" onclick="toggleSection('${key}')">` +
+    arrow + `<span class="section-title">${title}</span>` +
+    `<span class="section-count">${count}</span></div>`;
+  if (items.length === 0) {
+    return header + `<div class="context-items${open ? "" : " collapsed"}" id="${key}Items">` +
+      `<div class="context-empty">暂无内容</div></div>`;
+  }
+  const list = items.map((item, i) =>
+    `<div class="context-item">${itemFn(item, i)}</div>`
+  ).join("");
+  return header + `<div class="context-items${open ? "" : " collapsed"}" id="${key}Items">${list}</div>`;
+}
+
+// ── White-box Memory CRUD ──────────────────────────────────────
+// Architecture inspired by OpenBMB/PilotDeck's white-box memory
+// @see https://github.com/OpenBMB/PilotDeck
+
+function renderMemoryItem(item) {
+  const pinned = item.pinned ? ' mem-pinned' : '';
+  let sourceHtml = '';
+  if (item.source) {
+    const src = esc(item.source);
+    const at = item.created_at ? ' · ' + item.created_at.slice(0,10) : '';
+    sourceHtml = `<span class="mem-source">${src}${at}</span>`;
+  }
+  return `<div class="context-item mem-item${pinned}" id="mem_${item.id}">
+    <div class="mem-actions">
+      <button class="mem-btn" title="编辑" onclick="editMemory('${item.id}')">✏</button>
+      <button class="mem-btn" title="置顶" onclick="pinMemory('${item.id}', ${!item.pinned})">📌</button>
+      <button class="mem-btn del" title="删除" onclick="deleteMemory('${item.id}')">✕</button>
+    </div>
+    <div class="mem-content" id="mem_content_${item.id}">${esc(item.content).substring(0, 300)}</div>
+    ${sourceHtml}
+  </div>`;
+}
+
+async function addMemory() {
+  const content = prompt('新记忆内容：');
+  if (!content || !content.trim()) return;
+  try {
+    const resp = await fetch('/api/memory', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        action: 'add',
+        project: currentProjectKey,
+        content: content.trim(),
+        source: '手动添加 · ' + new Date().toISOString().slice(0, 10)
+      })
+    });
+    const data = await resp.json();
+    if (data.item) {
+      renderContext(); // Refresh the panel
+    }
+  } catch(e) {
+    alert('添加失败：' + e.message);
+  }
+}
+
+function editMemory(id) {
+  const contentDiv = document.getElementById('mem_content_' + id);
+  const currentText = contentDiv.textContent;
+  contentDiv.innerHTML = `<textarea class="mem-edit-textarea" id="mem_edit_${id}">${esc(currentText)}</textarea>
+    <div class="mem-edit-actions">
+      <button class="save" onclick="saveMemory('${id}')">保存</button>
+      <button onclick="renderContext()">取消</button>
+    </div>`;
+  document.getElementById('mem_edit_' + id).focus();
+}
+
+async function saveMemory(id) {
+  const textarea = document.getElementById('mem_edit_' + id);
+  const content = textarea.value.trim();
+  if (!content) { alert('内容不能为空'); return; }
+  try {
+    const resp = await fetch('/api/memory', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        action: 'edit',
+        project: currentProjectKey,
+        id: id,
+        content: content
+      })
+    });
+    const data = await resp.json();
+    if (data.item) {
+      renderContext();
+    } else {
+      alert('更新失败');
+    }
+  } catch(e) {
+    alert('更新失败：' + e.message);
+  }
+}
+
+async function deleteMemory(id) {
+  if (!confirm('删除这条记忆？')) return;
+  try {
+    const resp = await fetch('/api/memory', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        action: 'delete',
+        project: currentProjectKey,
+        id: id
+      })
+    });
+    await resp.json();
+    renderContext();
+  } catch(e) {
+    alert('删除失败：' + e.message);
+  }
+}
+
+async function pinMemory(id, pinned) {
+  try {
+    const resp = await fetch('/api/memory', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        action: 'pin',
+        project: currentProjectKey,
+        id: id,
+        pinned: pinned
+      })
+    });
+    await resp.json();
+    renderContext();
+  } catch(e) {
+    alert('置顶失败：' + e.message);
+  }
+}
+
+// ── Search ─────────────────────────────────────────────────────
+async function doSearch() {
+  const q = document.getElementById("searchInput").value.trim();
+  const resultsDiv = document.getElementById("searchResults");
+  if (!q || q.length < 1) {
+    resultsDiv.style.display = "none";
+    return;
+  }
+  try {
+    const resp = await fetch("/api/search?q=" + encodeURIComponent(q) + "&project=" + encodeURIComponent(currentProjectKey));
+    const data = await resp.json();
+    const results = data.results || [];
+    if (results.length === 0) {
+      resultsDiv.style.display = "block";
+      resultsDiv.innerHTML = '<div class="search-empty">未找到匹配结果</div>';
+      return;
+    }
+    resultsDiv.style.display = "block";
+    let html = "";
+    results.forEach((r, i) => {
+      const label = r.type === "memory" ? "🧠 记忆" : (r.role === "user" ? "👤 你" : "🜁 Hermes");
+      const roleClass = r.role === "user" ? " user" : "";
+      let ctx = "";
+      if (r.context_before) ctx += "…" + r.context_before + "\n";
+      ctx += r.content;
+      if (r.context_after) ctx += "\n" + r.context_after + "…";
+      html += `<div class="search-result" onclick="scrollToMsg(${r.index})">
+        <div class="sr-role${roleClass}">${label}</div>
+        <div class="sr-text">${esc(ctx.substring(0, 300))}</div>
+      </div>`;
+    });
+    resultsDiv.innerHTML = html;
+  } catch(e) {
+    resultsDiv.style.display = "block";
+    resultsDiv.innerHTML = '<div class="search-empty">搜索失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function scrollToMsg(idx) {
+  const el = document.getElementById("msg-" + idx);
+  if (el) {
+    el.scrollIntoView({behavior: "smooth", block: "center"});
+    el.style.outline = "2px solid #58a6ff";
+    setTimeout(() => { el.style.outline = ""; }, 2000);
+  }
+}
+
+// ── Project Deletion ────────────────────────────────────────────
+async function deleteProject(key, name) {
+  if (!confirm("确定要删除项目「" + name + "」吗？\n\n项目目录不会被删除，仅移除上下文记忆和会话。" + (key === currentProjectKey ? "\n\n⚠ 你当前正在此项目中！" : ""))) return;
+  try {
+    const resp = await fetch("/api/delete-project", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({project: key})
+    });
+    const data = await resp.json();
+    if (data.error) {
+      alert(data.message || "删除失败");
+      return;
+    }
+    // If deleting current project, switch to main
+    if (key === currentProjectKey) {
+      currentProjectKey = "main";
+      await loadMessages();
+      document.querySelector(".chat-header h3").textContent = "💬 主窗口";
+      document.querySelector(".chat-header .sub").textContent = "自动分流待命";
+      renderMessages();
+    }
+    renderProjects();
+    renderContext();
+  } catch(e) {
+    alert("删除失败: " + e.message);
+  }
+}
+
+// Load context and project list on page load
+renderContext();
+renderProjects();
+
+// ── IMAGE UPLOAD ───────────────────────────────────────────
+let pendingImages = [];  // [{dataUrl, file}]
+
+function handleImagePicked(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  // HEIF/HEIC not supported by API — convert to JPEG via canvas
+  const isHEIF = /\.(heic|heif)$/i.test(file.name) || file.type === 'image/heic' || file.type === 'image/heif';
+  if (isHEIF) {
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      const img = new Image();
+      img.onload = function() {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width; canvas.height = img.height;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        const jpegUrl = canvas.toDataURL('image/jpeg', 0.85);
+        pendingImages.push({dataUrl: jpegUrl, file: file});
+        renderImagePreviews();
+      };
+      img.onerror = function() {
+        alert('HEIF图片转换失败，请先转成JPG再发送');
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  } else {
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      pendingImages.push({dataUrl: ev.target.result, file: file});
+      renderImagePreviews();
+    };
+    reader.readAsDataURL(file);
+  }
+  e.target.value = '';  // reset so same file can be picked again
+}
+
+function removeImage(idx) {
+  pendingImages.splice(idx, 1);
+  renderImagePreviews();
+}
+
+function renderImagePreviews() {
+  const el = document.getElementById("imgPreview");
+  if (!el) return;
+  if (pendingImages.length === 0) { el.innerHTML = ''; return; }
+  el.innerHTML = pendingImages.map((img, i) =>
+    `<div class="thumb"><img src="${img.dataUrl}"><span class="del" onclick="removeImage(${i})">✕</span></div>`
+  ).join('');
+}
+
+// ── HISTORY PANEL ───────────────────────────────────────────
+let historyVisible = false;
+
+function toggleHistory() {
+  historyVisible = !historyVisible;
+  const panel = document.getElementById("historyPanel");
+  if (historyVisible) {
+    panel.classList.remove("hidden");
+    loadHistory();
+  } else {
+    panel.classList.add("hidden");
+  }
+}
+
+async function loadHistory() {
+  const list = document.getElementById("historyList");
+  list.innerHTML = '<div style="color:#484f58;font-size:0.8em">加载中…</div>';
+  try {
+    const resp = await fetch("/api/session-history");
+    const data = await resp.json();
+    if (!data.sessions || data.sessions.length === 0) {
+      list.innerHTML = '<div style="color:#484f58;font-size:0.8em">暂无历史记录</div>';
+      return;
+    }
+    const platEmoji = {weixin:"💬", feishu:"🪶", cli:"💻", cron:"⏰", unknown:"📡"};
+    list.innerHTML = data.sessions.map(s => {
+      const emoji = platEmoji[s.platform] || "📡";
+      return `<div class="history-item" onclick="viewHistorySession('${s.session_id}')">
+        <div><span class="h-date">${s.date}</span> <span class="h-platform">${emoji} ${s.platform}</span></div>
+        <div class="h-preview">${esc(s.preview)}</div>
+        <div style="font-size:0.65em;color:#30363d">${s.message_count}条消息 · ${s.user_messages}次对话</div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    list.innerHTML = `<div style="color:#f85149;font-size:0.8em">加载失败: ${esc(e.message)}</div>`;
+  }
+}
+
+async function viewHistorySession(sessionId) {
+  const list = document.getElementById("historyList");
+  list.innerHTML = '<div style="color:#484f58;font-size:0.8em">加载中…</div>';
+  try {
+    const resp = await fetch("/api/session-messages?id=" + encodeURIComponent(sessionId));
+    const data = await resp.json();
+    if (!data.messages || data.messages.length === 0) {
+      list.innerHTML = '<div style="color:#484f58;font-size:0.8em">无消息</div>';
+      return;
+    }
+    let html = `<div style="margin-bottom:8px"><a onclick="loadHistory()" style="cursor:pointer;color:#58a6ff;font-size:0.8em">← 返回列表</a></div>`;
+    html += data.messages.map(m => {
+      const isUser = m.role === "user";
+      const label = isUser ? "👤" : "🤖";
+      const txt = esc(m.content || "").substring(0, 300);
+      return `<div style="margin-bottom:6px;padding:6px 8px;background:${isUser?'#161b22':'#0d1117'};border-radius:6px;font-size:0.8em">
+        <span style="color:${isUser?'#58a6ff':'#8b949e'}">${label}</span> ${txt}${(m.content||"").length>300?'…':''}
+      </div>`;
+    }).join("");
+    list.innerHTML = html;
+  } catch(e) {
+    list.innerHTML = `<div style="color:#f85149;font-size:0.8em">加载失败: ${e.message}</div>`;
+  }
+}
+
+// ── Topic Management (server-side persistence) ──────────────────
+let topics = [];
+let topicDetectCount = 0;
+
+async function loadTopics() {
+  try {
+    const resp = await fetch("/api/topics?project=" + encodeURIComponent(currentProjectKey));
+    const data = await resp.json();
+    topics = data.topics || [];
+    // Also cache in localStorage for offline fallback
+    localStorage.setItem("hermes_topics_" + currentProjectKey, JSON.stringify(topics));
+  } catch(e) {
+    // Fallback to localStorage
+    try {
+      const raw = localStorage.getItem("hermes_topics_" + currentProjectKey);
+      if (raw) topics = JSON.parse(raw);
+    } catch(e2) { topics = []; }
+  }
+  renderTopics();
+}
+
+async function createTopic(name, fromDetection) {
+  if (!name || name.length < 2 || name.length > 20) return;
+  try {
+    const resp = await fetch("/api/topics", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({action: "create", name, project: currentProjectKey})
+    });
+    if (!resp.ok) { alert("创建话题失败"); return; }
+    const data = await resp.json();
+    if (data.topic) {
+      topics.push(data.topic);
+      localStorage.setItem("hermes_topics_" + currentProjectKey, JSON.stringify(topics));
+      renderTopics();
+      dismissTopicSuggestion();
+      if (fromDetection) switchTopic(data.topic.id);
+    }
+  } catch(e) { alert("创建话题失败"); }
+}
+
+async function deleteTopic(id) {
+  if (!confirm("删除话题？聊天记录将保留。")) return;
+  try {
+    const resp = await fetch("/api/topics", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({action: "delete", id, project: currentProjectKey})
+    });
+    if (!resp.ok) { alert("删除失败"); return; }
+    topics = topics.filter(t => t.id !== id);
+    localStorage.setItem("hermes_topics_" + currentProjectKey, JSON.stringify(topics));
+    if (currentTopicId === id) exitTopic();
+    renderTopics();
+  } catch(e) { alert("删除失败"); }
+}
+
+function switchTopic(id) {
+  if (currentTopicId) {
+    // Save current messages to server via saveMessages (which calls /api/chat implicitly)
+    // The messages are already on server via add_message with topic_id
+  } else {
+    saveMessages();
+  }
+  currentTopicId = id;
+  const topic = topics.find(t => t.id === id);
+  // Load messages from server session for this topic
+  messages = [];
+  hasWelcomed = true;
+  if (topic) {
+    document.querySelector(".chat-header h3").textContent = "📌 " + topic.name;
+    document.querySelector(".chat-header .sub").textContent = "话题 · 加载中…";
+    // Fetch topic messages from server
+    fetch("/api/messages?project=" + encodeURIComponent(currentProjectKey) + "&topic_id=" + encodeURIComponent(id))
+      .then(r => r.json())
+      .then(data => {
+        if (data.messages && data.messages.length > 0) {
+          messages = data.messages.map(m => ({role: m.role, text: m.content || m.text || ""}));
+          document.querySelector(".chat-header .sub").textContent = "话题 · " + messages.length + " 条消息";
+        } else {
+          messages = [];
+          document.querySelector(".chat-header .sub").textContent = "话题 · 新对话";
+        }
+        saveMessages();
+        renderMessages();
+      })
+      .catch(() => {
+        document.querySelector(".chat-header .sub").textContent = "话题 · 新对话";
+        renderMessages();
+      });
+  }
+  renderTopics();
+  renderContext();
+}
+
+async function exitTopic() {
+  currentTopicId = null;
+  topicDetectCount = 0;
+  await loadMessages();
+  // Restore header to current project (not hardcoded "主窗口")
+  const projItem = document.querySelector(`#projectList .project-item[data-key="${currentProjectKey}"]`);
+  if (projItem) {
+    const icon = projItem.querySelector(".icon")?.textContent || "💬";
+    const name = projItem.textContent.replace("🗑","").trim();
+    document.querySelector(".chat-header h3").textContent = icon + " " + name;
+  } else {
+    document.querySelector(".chat-header h3").textContent = "💬 主窗口";
+  }
+  document.querySelector(".chat-header .sub").textContent = currentProjectKey === "main" ? "自动分流待命" : "已切换";
+  renderMessages();
+  renderTopics();
+}
+
+async function detectTopic() {
+  topicDetectCount = 0;
+  if (currentTopicId || messages.length < 6) return;
+  try {
+    const resp = await fetch("/api/detect-topic", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({messages: messages.slice(-10)})
+    });
+    const data = await resp.json();
+    if (data.action === "switch") {
+      const key = data.project_key;
+      const keyMap = {"emperor-game":"👑 皇帝模拟游戏","redmane":"🐎 红鬃烈马","earnings":"📊 半导体财报","morning-brief":"📰 AI早报","podcast":"🎙 播客制作","hermes-agent":"⚙ Hermes Agent"};
+      const label = keyMap[key];
+      if (label) {
+        document.querySelectorAll(".project-item").forEach(el => {
+          if (el.textContent.trim() === label) el.click();
+        });
+      }
+    } else if (data.action === "new_project") {
+      showSuggestion(`检测到新项目「<b>${esc(data.name)}</b>」`, () => {
+        createProject(data.name);
+      });
+    } else if (data.action === "new_topic") {
+      showSuggestion(`检测到新话题「<b>${esc(data.name)}</b>」`, () => {
+        createTopic(data.name, true);
+      });
+    }
+  } catch(e) { /* ignore */ }
+}
+
+function showSuggestion(msg, onCreate) {
+  const bar = document.getElementById("topicSuggestion");
+  bar.innerHTML = `💡 ${msg} — <a id="suggCreate">创建</a> · <a onclick="dismissTopicSuggestion()">忽略</a>`;
+  bar.style.display = "block";
+  document.getElementById("suggCreate").onclick = () => { onCreate(); dismissTopicSuggestion(); };
+}
+
+async function createProject(name) {
+  dismissTopicSuggestion();
+  const resp = await fetch("/api/create-project", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name: name})
+  });
+  const data = await resp.json();
+  messages.push({role:"assistant", text: data.message || "项目创建完成"});
+  saveMessages();
+  renderMessages();
+  if (data.project_key) {
+    currentProjectKey = data.project_key;
+    saveMessages();
+    await fetch("/api/switch-project", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({project: data.project_key})
+    });
+    renderProjects();
+    messages = [];
+    hasWelcomed = true;
+    renderMessages();
+    renderContext();
+  }
+}
+
+function dismissTopicSuggestion() {
+  document.getElementById("topicSuggestion").style.display = "none";
+}
+
+function promptNewTopic() {
+  const name = prompt("话题名称（2-20字）：");
+  if (name) createTopic(name.trim(), false);
+}
+
+function renderTopics() {
+  const list = document.getElementById("topicList");
+  if (topics.length === 0 && !currentTopicId) {
+    list.innerHTML = '<div class="topic-empty">暂无话题。多轮讨论后自动生成。</div>';
+    return;
+  }
+  let html = "";
+  topics.forEach(t => {
+    const active = t.id === currentTopicId ? " active" : "";
+    html += `<div class="topic-item${active}" onclick="switchTopic('${t.id}')">
+      <span>📌</span> ${esc(t.name)}
+      <span style="margin-left:auto;display:flex;align-items:center;gap:4px">
+        <span style="font-size:0.7em;color:#484f58">${(t.messages||[]).length}</span>
+        <span onclick="event.stopPropagation();deleteTopic('${t.id}')" style="cursor:pointer;opacity:0.5;font-size:0.85em" title="删除">🗑</span>
+      </span>
+    </div>`;
+  });
+  if (currentTopicId) {
+    html += '<div class="topic-item" onclick="exitTopic()" style="color:#da3633;justify-content:center">← 返回主窗口</div>';
+  }
+  list.innerHTML = html;
+}
+
+// Load topics on page load
+loadTopics();
+
+// Topic detection: every 3 messages, detectTopic
+const origSend = sendMessage;
+sendMessage = function() {
+  origSend();
+  topicDetectCount++;
+  if (topicDetectCount >= 3) detectTopic();
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+# Hermes Context Isolation — nginx reverse proxy config
+# Place in /etc/nginx/sites-enabled/ or include from there
+
+# Web Chat frontend
+location /chat/ {
+    alias /var/www/html/chat/;
+    try_files $uri $uri/ /chat/index.html;
+}
+
+# Bridge API (production)
+location /api/ {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_set_header Host $host;
+    proxy_read_timeout 180s;
+    proxy_buffering off;
+}
+
+# Bridge API (test)
+location /api_test/ {
+    rewrite ^/api_test/(.*) /api/$1 break;
+    proxy_pass http://127.0.0.1:8766;
+    proxy_set_header Host $host;
+    proxy_read_timeout 180s;
+    proxy_buffering off;
+}
