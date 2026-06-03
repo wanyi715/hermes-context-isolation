@@ -7,12 +7,21 @@
 **Role:** HTTP API server handling all chat requests, topic management, project switching, and context injection.
 
 **Key Functions:**
-- `POST /api/chat` — Send message, get response (supports polling and streaming)
+- `POST /api/chat` — Send message, get response (supports polling and streaming/SSE)
 - `GET /api/messages` — Fetch session messages (supports project and topic_id parameters)
 - `POST /api/topics` — Create/delete/update topics (global, independent)
 - `GET /api/topics` — List all topics
 - `POST /api/switch-project` — Switch active project context
-- `POST /api/memory` — CRUD for white-box memory items
+- `POST /api/create-project` — Create new project
+- `POST /api/delete-project` — Delete project
+- `POST /api/memory` — CRUD for white-box memory items (add/edit/delete/pin)
+- `GET /api/memory` — List memory items for a project
+- `GET /api/context` — Get context data for UI display (files, memory, skills)
+- `GET /api/search` — Full-text search across session messages and memory
+- `GET /api/download` — Download a file by path (RFC 5987 encoding for non-ASCII filenames)
+- `GET /api/session-history` — List session history
+- `GET /api/session-messages` — Load messages from a session file
+- `GET /api/health` — Health check
 
 **Session Key Architecture:**
 - `"main"` — Main window (global persona)
@@ -25,96 +34,109 @@
 **Key Data Structures:**
 - `self.projects` — Dict of project info (name, memory, soul, skills, workspace)
 - `self.sessions` — Dict of session data (agent, messages) keyed by session key
-- `self.topics` — Global list of topic dicts (id, name, createdAt)
-- `self.session_files` — Dict of session-generated files
+- `self.topics` — Global list of topic dicts (id, title, createdAt)
+- `self.session_files` — Dict of session-generated files (persisted to disk)
 
 **Persistence:**
 - Project data: `~/.hermes/projects/{project}/` (SOUL.md, MEMORY.md, memory.json, workspace/)
-- Topic data: `~/.hermes/projects/_topics/` (topics.json, topic_{id}_chat.json, topic_{id}_archive/)
+- Topic data: `~/.hermes/projects/_topics/` (topics.json, topic_{id}_chat.json, topic_{id}_files.json, topic_{id}_archive/)
+- Session files: `{project_dir}/{key}_files.json` — survives restarts
 
-### 3. AIAgent (LLM interaction)
-**Role:** Wraps the LLM API (DeepSeek Chat) for conversation handling.
+### 3. AIAgent (LLM Interaction)
+**Role:** Wraps the LLM API for conversation handling.
+**Model:** mimo-v2.5-pro (via MiMo API, base_url: api.xiaomimimo.com/v1)
 
 **Key Features:**
-- Injects SOUL + MEMORY into system_message (for projects)
-- Supports boundary reminders (for topics and projects)
-- Handles conversation history and context management
+- Injects SOUL + MEMORY into ephemeral_system_prompt (per project)
+- Boundary reminders enforce project scope
+- Vision support: mimo-v2.5 for image description (HEIF→JPEG conversion via pillow_heif)
+- Skip global memory (skip_memory=True) — project memory injected separately
+- Max 40 iterations per conversation turn
 
-### 4. Nginx (Reverse Proxy)
-**Role:** SSL termination, basic auth, and routing.
-
-**Configuration:**
-- `/chat/` → Port 8765 (production)
-- `/chat_test/` → Port 8766 (test)
-- `/api/` → Port 8765 (production)
-- `/api_test/` → Port 8766 (test)
-
-### 5. Frontend (index.html)
-**Role:** Web UI for chat interface.
+### 4. Frontend (index.html)
+**Role:** Web UI for chat interface with three-layer architecture.
 
 **Key Features:**
 - Three-layer sidebar (Main Window, Projects, Topics)
 - Independent topic management (create, delete, switch)
-- Real-time message rendering with markdown support
-- Context panel showing memory, files, skills
+- Real-time SSE streaming with markdown rendering
+- Context panel: memory CRUD, file list with download, skill viewer
+- HEIF→JPEG canvas conversion for Safari browsers
+- Search across sessions
+- localStorage for UI state (per-environment prefix)
+
+### 5. Nginx (Reverse Proxy)
+**Role:** Routing, basic auth, static file serving.
+
+**Configuration (see nginx.conf.example):**
+- `/chat/` → Static files (index.html)
+- `/api/` → Port 8765 (production)
+- `/api_test/` → Port 8766 (test, rewritten to /api/)
+- `/files/` → Static file browser with auth
 
 ## File Structure
 
 ```
 ~/.hermes/projects/
-├── _topics/                    # Global topic storage
-│   ├── topics.json             # Topic list
-│   ├── topic-t_123_chat.json   # Topic chat history
-│   └── topic-t_123_archive/    # Topic message archives
-├── main/                       # Main window
-│   ├── SOUL.md
-│   ├── MEMORY.md
-│   ├── memory.json
-│   ├── chat_history.json
-│   └── workspace/ → ~/
-├── hermes-context-isolation/   # This project
-│   ├── SOUL.md
-│   ├── MEMORY.md
-│   ├── bridge.py               # HTTP API server
-│   └── docs/
-│       └── adr/                # Architecture Decision Records
-│           └── 001-three-layer-isolation.md
-└── [other projects...]
+├── _topics/                         # Global topic storage
+│   ├── topics.json                  # Topic list
+│   ├── topic-t_{id}_chat.json       # Topic chat history
+│   ├── topic-t_{id}_files.json      # Topic associated files (persisted)
+│   └── topic-t_{id}_archive/        # Topic message archives
+├── main/                            # Main window
+│   ├── SOUL.md                      # Concierge persona
+│   ├── MEMORY.md                    # Project registry + global facts
+│   ├── memory.json                  # Structured memory items
+│   ├── chat_history.json            # Recent messages
+│   └── workspace/ → ~/              # Home directory
+├── hermes-context-isolation/        # This project
+│   ├── bridge.py                    # HTTP API server
+│   ├── index.html                   # Web Chat frontend
+│   ├── SOUL.md / MEMORY.md          # Project config
+│   └── docs/                        # Documentation
+│       ├── adr/001-three-layer-isolation.md
+│       └── components.md
+└── [other projects...]              # Each has SOUL.md + MEMORY.md
 ```
 
-## API Endpoints
+## Context Injection Flow
 
-### Chat
-- `POST /api/chat` — Send message (mode: "poll" or "stream")
-- `GET /api/task/{task_id}` — Poll for task result
-- `GET /api/messages?project={key}&topic_id={id}` — Fetch messages
-
-### Topics (Global, Independent)
-- `POST /api/topics` — Create/delete/update topics
-- `GET /api/topics` — List all topics
-
-### Projects
-- `POST /api/switch-project` — Switch active project
-- `GET /api/projects` — List all projects
-- `POST /api/create-project` — Create new project
-- `POST /api/delete-project` — Delete project
-
-### Memory
-- `POST /api/memory` — CRUD for memory items
-- `GET /api/memory?project={key}` — List memory items
-
-### Context
-- `GET /api/context?topic_id={id}` — Get context for UI display
-- `GET /api/search?q={query}&project={key}` — Search messages
+```
+User message → bridge.py
+  ↓
+1. Identify session (main / project / topic)
+  ↓
+2. Build ephemeral_system_prompt:
+   - Identity boundary ("你正在 X 项目窗口内")
+   - SOUL.md (persona + rules)
+   - MEMORY.md (project facts)
+   - Skills list (if available)
+  ↓
+3. Call LLM API (mimo-v2.5-pro) with:
+   - ephemeral_system_prompt
+   - conversation history
+   - available tools
+  ↓
+4. Detect file paths in response → persist to session_files
+  ↓
+5. Save messages to chat_history.json
+```
 
 ## Deployment
 
-**Production:**
-- Port 8765 (Nginx: `/chat/`, `/api/`)
-- Systemd user service (optional)
-- WeChat integration via iLink Bot API
+**Prerequisites:**
+- Python 3.11+
+- MiMo API key (in .env)
+- pillow_heif (for HEIF image conversion)
 
-**Test:**
-- Port 8766 (Nginx: `/chat_test/`, `/api_test/`)
-- Same codebase as production
-- Independent session state
+**Start:**
+```bash
+python bridge.py  # reads PORT from env, default 8765
+```
+
+**Environment (.env):**
+```
+HERMES_MODEL=mimo-v2.5-pro
+MIMO_API_KEY=sk-xxxxx
+HERMES_BASE_URL=https://api.xiaomimimo.com/v1
+```

@@ -338,23 +338,27 @@
           <h3>Production Status</h3>
         </div>
         <ul>
-          <li>• Running on a 1.6GB RAM VPS</li>
-          <li>• 8 projects + topics actively isolated</li>
-          <li>• Dual entry: Web chat + WeChat</li>
-          <li>• Passed multi-round memory contamination tests</li>
+          <li>• Running on 1.6GB RAM VPS (Alibaba Cloud ECS)</li>
+          <li>• LLM: mimo-v2.5-pro via MiMo API</li>
+          <li>• Vision: mimo-v2.5 (HEIF→JPEG auto-conversion)</li>
+          <li>• 9 projects + topics actively isolated</li>
+          <li>• Dual entry: Web Chat + WeChat (iLink Bot)</li>
+          <li>• White-box memory CRUD + file download + search</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot emerald"></div>
-          <h3><a href="/writing/" style="color:#34d399;text-decoration:none">📝 Writing Project Docs →</a></h3>
+          <h3>API Endpoints</h3>
         </div>
         <ul>
-          <li>• Long-form fiction writing workflow</li>
-          <li>• Character cards + faction system</li>
-          <li>• World-building templates</li>
-          <li>• Chapter outline & progress tracking</li>
+          <li>• <code>POST /api/chat</code> — Send message (poll/SSE)</li>
+          <li>• <code>GET /api/context</code> — UI context (files, memory)</li>
+          <li>• <code>POST /api/topics</code> — Topic CRUD</li>
+          <li>• <code>POST /api/memory</code> — Memory CRUD</li>
+          <li>• <code>GET /api/search</code> — Full-text search</li>
+          <li>• <code>GET /api/download</code> — File download</li>
         </ul>
       </div>
     </div>
