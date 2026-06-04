@@ -572,6 +572,7 @@ async function sendMessage() {
       messages[thinkingIdx] = {role:"assistant", text: "⏰ 请求超时（10分钟），请重试。"};
     }
     renderMessages();
+    renderContext();  // Refresh right panel to show any new files from response
   } catch(e) {
     messages[thinkingIdx] = {role:"assistant", text:"抱歉，请求失败：" + e.message};
     saveMessages();
