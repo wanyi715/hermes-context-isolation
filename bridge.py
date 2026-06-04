@@ -1100,14 +1100,17 @@ class ChatHandler(BaseHTTPRequestHandler):
         print(f"[bridge] Chat ({project_key}): {_message_preview(message)[:60]}...")
 
         try:
-            agent = pm.get_agent(project_key)
+            # Topics get their own isolated agent (not shared with main window)
+            topic_id = data.get("topic_id")
+            agent_key = pm._session_key(project_key, topic_id) if topic_id else project_key
+            agent = pm.get_agent(agent_key)
             # Use frontend-supplied history (for topics) or session messages
             custom_history = data.get("history")
             if custom_history and isinstance(custom_history, list):
                 messages = custom_history
             else:
-                sk = pm._session_key(project_key, data.get("topic_id"))
-                sess = pm.sessions.get(sk, pm.sessions.get(project_key, {}))
+                sk = agent_key
+                sess = pm.sessions.get(sk, {})
                 messages = sess.get("messages", [])
 
             # Always inject project context (SOUL + MEMORY) every turn
@@ -1173,14 +1176,17 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         def run_task():
             try:
-                agent = pm.get_agent(project_key)
+                # Topics get their own isolated agent (not shared with main window)
+                topic_id = data.get("topic_id")
+                agent_key = pm._session_key(project_key, topic_id) if topic_id else project_key
+                agent = pm.get_agent(agent_key)
                 # Use frontend-supplied history (for topics) or session messages
                 custom_history = data.get("history")
                 if custom_history and isinstance(custom_history, list):
                     messages = custom_history
                 else:
-                    sk = pm._session_key(project_key, data.get("topic_id"))
-                    sess = pm.sessions.get(sk, pm.sessions.get(project_key, {}))
+                    sk = agent_key
+                    sess = pm.sessions.get(sk, {})
                     messages = sess.get("messages", [])
                 context = pm.get_context_for_chat(project_key) if not is_main else ""
                 _msg = message  # capture for closure, don't shadow outer
@@ -1272,9 +1278,12 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         def run_agent():
             try:
-                agent = pm.get_agent(project_key)
-                sk = pm._session_key(project_key, data.get("topic_id"))
-                sess = pm.sessions.get(sk, pm.sessions.get(project_key, {}))
+                # Topics get their own isolated agent (not shared with main window)
+                topic_id = data.get("topic_id")
+                agent_key = pm._session_key(project_key, topic_id) if topic_id else project_key
+                agent = pm.get_agent(agent_key)
+                sk = agent_key
+                sess = pm.sessions.get(sk, {})
                 messages = sess.get("messages", [])
                 # Capture outer scope variables for closure safety
                 _msg = message
