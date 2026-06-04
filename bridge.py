@@ -772,10 +772,14 @@ def _detect_files(text):
         return []
     files = []
     seen = set()
-    # Match absolute paths under safe directories
+    # Match absolute paths under safe directories, AND ~/ tilde paths
     _HOME = os.path.expanduser("~") + "/"
-    for m in _re.finditer(r'(/tmp/[\w./-]+\.\w{2,5}|' + _re.escape(_HOME) + r'[\w./-]+\.\w{2,5})', text):
+    _pattern = r'~/[\w./-]+\.\w{2,5}|/tmp/[\w./-]+\.\w{2,5}|' + _re.escape(_HOME) + r'[\w./-]+\.\w{2,5}'
+    for m in _re.finditer(_pattern, text):
         fp = m.group(0).rstrip('.,;:!?）)')
+        # Expand tilde paths to absolute
+        if fp.startswith("~/"):
+            fp = os.path.expanduser("~") + fp[1:]
         if fp in seen:
             continue
         ext = os.path.splitext(fp)[1].lower()
